@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createEnvironment } from './environment';
 import { buildOrganicSpecimen } from './specimen';
 import { ResinSurface } from './surface';
+import { capturePose, randomizePoses, type LayerPose, type CompositionSnapshot } from './composition';
 import { ImageRelief, type ReliefSettings } from './relief';
 import type { QualityRenderer } from './quality';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -55,6 +56,8 @@ export interface Settings {
   smoothing: number;
   wrap: number;
   coatThickness: number;
+  foldLips: number;
+  lipRounding: number;
 }
 export const defaults: Settings = {
   ior: 1.48, distortion: 0.72, frequency: 1.0, roughness: 0.018,
@@ -63,6 +66,7 @@ export const defaults: Settings = {
   imperfections: 0.28, lightRotation: 0, keyLight: 2.8,
   reflections: false, reflectionStrength: 0.5,
   smoothing: 0.8, wrap: 0.7, coatThickness: 0.3,
+  foldLips: 0.3, lipRounding: 0.45,
 };
 const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'avif']);
@@ -100,6 +104,7 @@ export class ResinEngine {
   private environment: THREE.Texture;
   private warmEnvironment: THREE.Texture;
   private specimen = new THREE.Group();
+  private specimenDirty=false;
   private originalSurface: Float32Array;
   private surface = new ResinSurface();
   private resizeObserver: ResizeObserver;
@@ -113,6 +118,11 @@ export class ResinEngine {
   private preparingQuality = false;
   private qualityGeneration = 0;
   private lastRenderState = '';
+  private compositionBases=new Map<string,LayerPose>();
+  private compositionHistory:CompositionSnapshot[]=[];
+  private compositionCursor=-1;
+  keepUploadedLayers=false;
+  onCompositionChange?:()=>void;
   qualityScale = 1;
   qualitySamples = 256;
   onRenderState?: (state: RenderState) => void;
@@ -242,6 +252,7 @@ export class ResinEngine {
     this.returnToPreview();
     this.needsRender = true;
     this.settings[key] = value;
+    if(key==='seed')this.resetCompositionHistory();
     const s = this.settings;
     const highlights = s.reflections ? s.reflectionStrength : 0;
     this.resinMaterial.specularIntensity = highlights;
@@ -262,7 +273,7 @@ export class ResinEngine {
     this.scene.environment = s.light === 'sunset' ? this.warmEnvironment : this.environment;
     this.fill.color.set(s.light === 'sunset' ? '#c8a6dc' : '#c9d6f2');
     this.scene.environmentRotation.set(0, angle, 0);
-    if (key === 'distortion' || key === 'frequency' || key === 'seed' || key === 'smoothing' || key === 'wrap' || key === 'coatThickness') this.updateSurface();
+    if (key === 'distortion' || key === 'frequency' || key === 'seed' || key === 'smoothing' || key === 'wrap' || key === 'coatThickness' || key === 'foldLips' || key === 'lipRounding') this.updateSurface();
     if (key === 'seed' || key === 'preset') this.buildSpecimen();
     if (key === 'imperfections') {
       const specks = this.specimen.getObjectByName('resin-inclusions') as THREE.InstancedMesh | undefined;
@@ -316,20 +327,67 @@ export class ResinEngine {
   private buildSpecimen() {
     for (const child of [...this.specimen.children]) disposeObject(child);
     const generated = buildOrganicSpecimen(this.settings);
+    this.specimenDirty=false;
     this.specimen.add(...generated.children);
+  }
+
+  private syncLayer(layer: Layer) {
+    layer.object.visible=layer.visible;
+    layer.object.scale.setScalar(layer.scale);
+    layer.object.position.set(layer.x,layer.depth,layer.z);
+    layer.object.rotation.set(THREE.MathUtils.degToRad(layer.tilt),THREE.MathUtils.degToRad(layer.rotation),0);
   }
 
   updateLayer(layer: Layer) {
     this.returnToPreview();
-    layer.object.visible = layer.visible;
-    layer.object.scale.setScalar(layer.scale);
-    layer.object.position.y = layer.depth;
-    layer.object.position.x = layer.x;
-    layer.object.position.z = layer.z;
-    layer.object.rotation.y = THREE.MathUtils.degToRad(layer.rotation);
-    layer.object.rotation.x = THREE.MathUtils.degToRad(layer.tilt);
-    if (layer.relief) this.updateSurface();
-    this.needsRender = true;
+    this.syncLayer(layer);
+    if(layer.kind==='specimen'&&layer.visible&&this.specimenDirty)this.buildSpecimen();
+    if(layer.relief)this.updateSurface();
+    this.resetCompositionHistory();
+    this.needsRender=true;
+  }
+
+  private resetCompositionHistory() {
+    this.compositionBases.clear();this.compositionHistory=[];this.compositionCursor=-1;
+    this.onCompositionChange?.();
+  }
+
+  private captureComposition():CompositionSnapshot {
+    return {seed:this.settings.seed,poses:this.layers.filter(l=>l.kind!=='specimen').map(l=>({id:l.id,pose:capturePose(l)}))};
+  }
+
+  get canPreviousComposition() {return this.compositionCursor>0;}
+
+  randomizeComposition(seed:number) {
+    if(!Number.isInteger(seed)||seed<0||seed>9999)throw new Error('Choose a composition seed from 0 to 9999.');
+    this.returnToPreview();
+    if(!this.compositionHistory.length) {this.compositionHistory=[this.captureComposition()];this.compositionCursor=0;}
+    for(const layer of this.layers)if(layer.kind!=='specimen'&&!this.compositionBases.has(layer.id))this.compositionBases.set(layer.id,capturePose(layer));
+    if(!this.keepUploadedLayers) {
+      const bases=this.layers.filter((layer):layer is Layer & {kind:'image'|'model'}=>layer.kind!=='specimen'&&layer.visible)
+        .map(layer=>({id:layer.id,kind:layer.kind,pose:this.compositionBases.get(layer.id)!}));
+      for(const result of randomizePoses(seed,bases)) {
+        const layer=this.layers.find(l=>l.id===result.id)!;Object.assign(layer,result.pose);this.syncLayer(layer);
+      }
+    }
+    // Only seed and layer placement change. All optical, material and light
+    // settings, source visibility and the camera are deliberately preserved.
+    this.settings.seed=seed;if(this.specimen.visible)this.buildSpecimen();else this.specimenDirty=true;this.updateSurface();this.needsRender=true;
+    this.compositionHistory=this.compositionHistory.slice(0,this.compositionCursor+1);
+    this.compositionHistory.push(this.captureComposition());
+    if(this.compositionHistory.length>48)this.compositionHistory.shift();
+    this.compositionCursor=this.compositionHistory.length-1;
+    this.onCompositionChange?.();
+  }
+
+  previousComposition() {
+    if(!this.canPreviousComposition)return;
+    this.returnToPreview();
+    const state=this.compositionHistory[--this.compositionCursor];this.settings.seed=state.seed;
+    for(const saved of state.poses) {
+      const layer=this.layers.find(l=>l.id===saved.id);if(layer){Object.assign(layer,saved.pose);this.syncLayer(layer);}
+    }
+    if(this.specimen.visible)this.buildSpecimen();else this.specimenDirty=true;this.updateSurface();this.needsRender=true;this.onCompositionChange?.();
   }
 
   setLayerMaterial(layer: Layer, material: LayerMaterial) {
@@ -360,6 +418,7 @@ export class ResinEngine {
     });
     disposeObject(layer.object);
     this.layers.splice(index, 1);
+    this.resetCompositionHistory();
     if (layer.relief) this.updateSurface();
     this.needsRender = true;
   }

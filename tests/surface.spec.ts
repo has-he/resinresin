@@ -26,3 +26,26 @@ test('continuous resin normals agree with independent height differences and smo
   expect(soft).toBeLessThan(sharp*0.85);
   surface.dispose();
 });
+
+test('fold lips create rounded geometric ridges with accurate smooth normals',()=>{
+  const surface=new ResinSurface();surface.update({...settings,foldLips:0});
+  const locations:Array<{x:number;z:number;height:number}>=[];
+  for(let x=-2.4;x<2.4;x+=0.15)for(let z=-2.1;z<2.1;z+=0.16)locations.push({x,z,height:surface.sample(x,z).x});
+  surface.update({...settings,foldLips:0.9,lipRounding:0});
+  let maximumLift=0,maximumError=0;
+  for(const p of locations){
+    const field=surface.sample(p.x,p.z),e=0.002;
+    maximumLift=Math.max(maximumLift,field.x-p.height);
+    const dx=(surface.sample(p.x+e,p.z).x-surface.sample(p.x-e,p.z).x)/(2*e);
+    const dz=(surface.sample(p.x,p.z+e).x-surface.sample(p.x,p.z-e).x)/(2*e);
+    maximumError=Math.max(maximumError,new THREE.Vector3(-dx,1,-dz).normalize().angleTo(new THREE.Vector3(-field.y,1,-field.z).normalize()));
+  }
+  expect(maximumLift).toBeGreaterThan(0.2);
+  expect(maximumError).toBeLessThan(0.04);
+  const sharp=locations.map(p=>surface.sample(p.x,p.z).toArray());
+  surface.update({...settings,foldLips:0.9,lipRounding:1});
+  let changed=0;
+  locations.forEach((p,i)=>{const v=surface.sample(p.x,p.z);changed+=Math.abs(v.y-sharp[i][1])+Math.abs(v.z-sharp[i][2]);});
+  expect(changed/locations.length).toBeGreaterThan(0.02);
+  surface.dispose();
+});

@@ -283,7 +283,12 @@ test('quality mode accumulates real samples, pauses, exports its native render, 
   await page.waitForFunction(() => (window as unknown as { __resin: {renderState: {samples: number}} }).__resin.renderState.samples >= 1, undefined, { timeout: 90_000 });
   expect((await state()).mode).toBe('quality');
   expect(new Set(await pixels(page)).size).toBeGreaterThan(40);
-  // A camera gesture immediately restores editing; it must not leave a stale trace.
+  // Composition exploration also cancels the old accumulated render.
+  const oldSeed=await page.evaluate(()=>(window as unknown as {__resin:{settings:{seed:number}}}).__resin.settings.seed);
+  await page.locator('#next-composition-canvas').click();
+  await expect(page.locator('#next-composition-canvas')).toBeEnabled();
+  expect(await page.evaluate(()=>(window as unknown as {__resin:{settings:{seed:number}}}).__resin.settings.seed)).not.toBe(oldSeed);
+  // A camera gesture must continue to leave editing in Preview.
   await page.locator('#reset-view').click();
   await expect(page.locator('#preview-mode')).toHaveAttribute('aria-pressed','true');
   expect((await state()).mode).toBe('preview');
@@ -367,5 +372,43 @@ test('image depth maps create real relief, smoothing/inversion work, and the res
   await page.screenshot({path:'.local/relief-flat.png'});
   await renderedAfter(page,()=>page.getByRole('switch',{name:'Physical relief'}).check());
   await page.screenshot({path:'.local/relief-raised.png'});
+  expect(errors).toEqual([]);
+});
+
+
+test('composition explorer changes arrangements, restores previous layouts, and keeps lighting and the camera fixed',async({page})=>{
+  test.setTimeout(150_000);
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+  await ready(page);
+  await page.locator('#light').selectOption('sunset');await setSlider(page,'exposure','1.2');await setSlider(page,'lightRotation','82');
+  const settings=()=>page.evaluate(()=>(window as unknown as {__resin:{settings:Record<string,number|string|boolean>}}).__resin.settings);
+  const composition=()=>page.evaluate(()=>(window as unknown as {__resin:{composition:{canPrevious:boolean;camera:{position:number[];target:number[]};poses:{name:string;x:number;z:number;scale:number;depth:number;rotation:number;tilt:number}[]}}}).__resin.composition);
+  const beforeSettings=await settings(),beforeCamera=(await composition()).camera,beforePixels=await pixels(page);
+  await expect(page.locator('#previous-composition-canvas')).toBeDisabled();
+  await renderedAfter(page,()=>page.locator('#next-composition-canvas').click());
+  await expect(page.locator('#next-composition-canvas')).toBeEnabled();
+  const next=await settings(),{seed:oldSeed,...calibration}=beforeSettings,{seed:newSeed,...afterCalibration}=next;
+  expect(newSeed).not.toBe(oldSeed);expect(afterCalibration).toEqual(calibration);
+  const afterCamera=(await composition()).camera;
+  beforeCamera.position.forEach((v,i)=>expect(afterCamera.position[i]).toBeCloseTo(v,8));beforeCamera.target.forEach((v,i)=>expect(afterCamera.target[i]).toBeCloseTo(v,8));
+  expect(difference(beforePixels,await pixels(page))).toBeGreaterThan(2);
+  await renderedAfter(page,()=>page.locator('#previous-composition-canvas').click());
+  await expect(page.locator('#previous-composition-canvas')).toBeDisabled();
+  expect((await settings()).seed).toBe(oldSeed);expect(difference(beforePixels,await pixels(page))).toBeLessThan(0.5);
+  await page.locator('#file-input').setInputFiles([{name:'composition-photo.png',mimeType:'image/png',buffer:await imagePNG(page)},{name:'composition-model.glb',mimeType:'model/gltf-binary',buffer:tetrahedronGLB()}]);
+  await expect(page.locator('#layers [role=listitem]')).toHaveCount(3);await expect(page.locator('#next-composition-canvas')).toBeEnabled();
+  const originalPoses=(await composition()).poses;
+  const enterSeed=async(seed:number)=>{await page.locator('#composition-seed').fill(String(seed));await page.locator('#composition-seed').press('Enter');await page.waitForFunction(value=>(window as unknown as {__resin:{settings:{seed:number}}}).__resin.settings.seed===value,seed);await expect(page.locator('#next-composition-canvas')).toBeEnabled();};
+  await enterSeed(1234);const first=(await composition()).poses;expect(first).not.toEqual(originalPoses);
+  first.forEach((pose,i)=>{expect(pose.depth).toBe(originalPoses[i].depth);expect(pose.tilt).toBe(originalPoses[i].tilt);});
+  await enterSeed(4321);expect((await composition()).poses).not.toEqual(first);
+  await enterSeed(1234);expect((await composition()).poses).toEqual(first);
+  await page.locator('#keep-uploaded').check();await enterSeed(9001);expect((await composition()).poses).toEqual(first);
+  const {seed:finalSeed,...finalCalibration}=await settings();expect(finalCalibration).toEqual(calibration);
+  await page.locator('#project-name').focus();await page.keyboard.press('r');expect((await settings()).seed).toBe(finalSeed);
+  await page.locator('#stage canvas').click({position:{x:25,y:25}});await page.keyboard.press('r');await expect(page.locator('#next-composition-canvas')).toBeEnabled();
+  await page.waitForFunction(value=>(window as unknown as {__resin:{settings:{seed:number}}}).__resin.settings.seed!==value,finalSeed);
+  expect((await composition()).poses).toEqual(first);
+  await page.screenshot({path:'.local/composition-explorer.png'});
   expect(errors).toEqual([]);
 });

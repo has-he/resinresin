@@ -6,7 +6,7 @@ export const RESIN_WIDTH = 10.8;
 export const RESIN_DEPTH = 9.4;
 const GRID = 257;
 const smooth = (a: number, b: number, v: number) => { const t = THREE.MathUtils.clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
-export interface SurfaceSettings { seed: number; distortion: number; frequency: number; smoothing: number; wrap: number; coatThickness: number }
+export interface SurfaceSettings { seed: number; distortion: number; frequency: number; smoothing: number; wrap: number; coatThickness: number; foldLips?: number; lipRounding?: number }
 export interface CoatingSample { height: number; coverage: number }
 export type CoatingSource = (x: number, z: number) => CoatingSample;
 
@@ -74,6 +74,16 @@ export class ResinSurface {
       sz: (0.8 + random() * 1.55) / settings.frequency * (1 + softness * 0.1),
       angle: random() * Math.PI, height: (i % 3 === 0 ? 1.0 : 0.45) + random() * 0.6,
     }));
+    const curves=Array.from({length:2},(_,i)=>{
+      const angle=(i===0?-0.45:0.9)+random()*0.65;
+      return {x:(random()-0.5)*(i===0?1.5:3),z:(random()-0.5)*2,
+        cos:Math.cos(angle),sin:Math.sin(angle),bend:0.25+random()*0.45,
+        phase:random()*Math.PI*2,length:2.6+random()*0.7,width:0.32+random()*0.08};
+    });
+    const lipStrength=(settings.foldLips??0)*settings.distortion*0.6;
+    // A small positive fillet radius gives a crisp lip with continuous normals.
+    // It never returns to the discontinuous, faceted ridges of the first mesh.
+    const tipRadius=0.14+(settings.lipRounding??0.45)*0.32;
     const bases=lenses.map(lens=>({cos:Math.cos(lens.angle),sin:Math.sin(lens.angle)}));
     for (let iz = 0; iz < GRID; iz++) {
       const z = (iz / (GRID - 1) - 0.5) * RESIN_DEPTH;
@@ -93,12 +103,24 @@ export class ResinSurface {
         const width = 0.22 + softness * 0.4;
         const channel = Math.exp(-(((x - Math.sin(z * 1.15 + 0.6) * 0.65) / width) ** 2)) * 0.22 * (1 - softness * 0.5);
         let height = 0.40 + settings.distortion * (Math.tanh(h * 0.85) * 1.35 - channel);
+        const poolHeight=height;
+        if(lipStrength>0)for(const curve of curves) {
+          const dx=x-curve.x,dz=z-curve.z;
+          const u=dx*curve.cos+dz*curve.sin,v=-dx*curve.sin+dz*curve.cos;
+          const phase=v*0.85+curve.phase;
+          const derivative=curve.bend*0.85*Math.cos(phase);
+          const distance=(u-curve.bend*Math.sin(phase))/Math.sqrt(1+derivative*derivative);
+          const ridge=Math.exp(-(Math.sqrt(distance*distance+tipRadius*tipRadius)-tipRadius)/curve.width);
+          const recess=0.55*Math.exp(-(((distance+0.45)/0.22)**2));
+          const fade=Math.exp(-((v/curve.length)**6));
+          height+=(ridge-recess)*fade*lipStrength;
+        }
         if (coverageField && weightedHeight) {
           const index=iz*GRID+ix, coverage=coverageField[index];
           const coat = {height:coverage>0.0001?weightedHeight[index]/coverage:-1.4,coverage:coverage>0.0001?coverage:0};
           if (coat.coverage > 0) {
-            const target = coat.height + settings.coatThickness + (height - 0.4) * 0.18;
-            height = THREE.MathUtils.lerp(height, target, coat.coverage * settings.wrap);
+            const target = coat.height + settings.coatThickness + (poolHeight - 0.4) * 0.18;
+            height = THREE.MathUtils.lerp(poolHeight, target, coat.coverage * settings.wrap)+(height-poolHeight);
             // Keep a minimum cover over the central part of the relief.
             height = THREE.MathUtils.lerp(height, Math.max(height, coat.height + 0.08), smooth(0.2,0.7,coat.coverage));
           }
