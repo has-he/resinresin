@@ -50,9 +50,19 @@ To run the source locally after downloading, open a terminal in the extracted fo
 
 Everything, including uploaded assets, remains in the current browser session. **There is no project persistence yet**: export your work before refreshing or closing the tab. Large models can be expensive; imports are limited to 120 MB per file. A desktop browser with hardware-accelerated WebGL 2 is recommended.
 
+## Image relief and depth maps
+
+Select an image layer and use **Upload depth** to attach an aligned greyscale depth/height image. White raises the surface and black leaves it low. The colour photo remains its original texture; depth displaces a subdivided mesh and generates surface normals, a back and side walls. This is 2.5D relief, not reconstruction of hidden sides.
+
+- **Physical relief** switches between the original flat image and its relief while retaining the loaded map.
+- **Relief depth**, **Depth smoothing** and **Invert depth** adjust the geometry. Depth processing uses floating-point filtering to reduce terraces in 8-bit depth images.
+- **Quick emboss** generates an artistic height field from image brightness. It is explicitly not AI depth estimation: highlights and shadows in a photograph are not reliable depth cues. For accurate placement, use a depth map from a depth-estimation or painting tool.
+- Under Surface, **Follow image relief** blends the resin toward enabled, visible image-relief layers; **Coating thickness** adjusts their cover. This follow operation uses a top height field with feathered boundaries. It is not a fluid simulation or a general-purpose offset of arbitrary 3D models. Imported 3D models continue to use their authored geometry.
+- Depth maps are stretched to the colour image's UV coordinates, so they must depict the same aligned image. Disabling/removing/hiding a relief updates the resin. Source-image resolution remains finite, and baked photo lighting stays in the colour texture.
+
 ## Preview and quality rendering
 
-**Preview** keeps editing interactive. The resin is a closed, procedurally deformed mesh with broad pools, individual lens bulges and narrow channels. Three.js physical transmission, absorption and dispersion render it over the scene. This mode uses a finite screen-space buffer and cannot recover off-screen or occluded information. Shadows and reflections are deliberately lit for a close material study.
+**Preview** keeps editing interactive. The resin is a closed, procedurally deformed mesh with broad pools, individual lens bulges and narrow channels. A floating-point height field, cubic filtering and continuous surface normals are shared by Preview and Quality; a denser shell keeps ray intersections close to that field. **Surface smoothing** removes narrow lips and widens channels without applying blur to the final image. Preview captures refraction at 1.5× resolution. Three.js physical transmission, absorption and dispersion render it over the scene. This mode uses a finite screen-space buffer and cannot recover off-screen or occluded information. Shadows and reflections are deliberately lit for a close material study.
 
 **Quality render** lazily loads `three-gpu-pathtracer` and follows rays through the real scene, including the resin's entry/exit surfaces, reflections, absorption, direct illumination and diffuse interreflection. It builds a geometry acceleration structure when you enter the mode. Instanced foliage is expanded into geometry so the same contents remain present. It uses 7 scattering bounces plus up to 12 extra transmissive traversals.
 
@@ -64,7 +74,7 @@ The procedural colour/grain functions are shared between the two renderers. In Q
 - Return to Preview at any time. Changing the scene, dragging the camera, resizing the canvas or switching mobile panels returns to Preview and releases tracing resources; enter Quality again to render the edited composition.
 - Quality uses the same WebGL canvas and requires floating-point render targets. Preparation and GPU compilation can take time. Unsupported devices show a message and retain Preview. Hardware acceleration is strongly recommended.
 
-This remains an artistic material study, not an exact reproduction of photographed resin. The current tracer is RGB rather than spectral: colour dispersion is Preview-only. Sharp caustics can remain noisy or underrepresented, and deeply nested dielectric interfaces have limits. Neither mode invents missing detail in source images. Some material texture maps are resampled to a 2048-pixel atlas in Quality. Small suspended inclusions are geometric specks, not a full simulation of air bubbles or volumetric scattering.
+This remains an artistic material study, not an exact reproduction of photographed resin. The current tracer is RGB rather than spectral: colour dispersion is Preview-only. Sharp caustics can remain noisy or underrepresented, and deeply nested dielectric interfaces have limits. Neither mode invents missing detail in source images. Some material texture maps are resampled to a 2048-pixel atlas in Quality. Relief does not recover hidden surfaces or unseen image detail, and transparent cutouts are not reconstructed as watertight side contours. Small suspended inclusions are geometric specks, not a full simulation of air bubbles or volumetric scattering.
 
 The built-in specimen contains branching twigs, moss fronds, flattened lichen lobes, coloured irregular stone meshes and suspended specks. Surface clouding adds local roughness, not physically simulated milky volume scattering. Sources are not automatically clipped to the resin: moving or enlarging a layer can expose it outside the shell. Uploaded model animations are not played.
 
@@ -74,7 +84,9 @@ Static Preview draws on demand; Orbit and Quality sampling draw continuously. Ex
 
 - `src/engine.ts` — renderer, resin geometry, specimen generation, imports, transforms, export and resource cleanup.
 - `src/materials.ts` — shared world-space colour/grain functions and resin surface clouding.
-- `src/surface.ts` — irregular closed resin surface generation.
+- `src/surface.ts` — smooth floating-point height field, cubic sampling, continuous normals and closed resin geometry.
+- `src/relief.ts` — image height-map loading, float smoothing, relief geometry and coating-height samples.
+- `src/random.ts` — deterministic seeded arrangement generation.
 - `src/specimen.ts` — fronds, lichen, stones, twigs and suspended inclusions.
 - `src/environment.ts` — local floating-point HDR lighting maps.
 - `src/quality.ts` — progressive path tracer, instance expansion and procedural-material integration.

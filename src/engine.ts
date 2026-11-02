@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createEnvironment } from './environment';
 import { buildOrganicSpecimen } from './specimen';
-import { reshapeResin } from './surface';
+import { ResinSurface } from './surface';
+import { ImageRelief, type ReliefSettings } from './relief';
 import type { QualityRenderer } from './quality';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
@@ -32,6 +33,7 @@ export interface Layer {
   rotation: number;
   tilt: number;
   material: LayerMaterial;
+  relief?: ImageRelief;
 }
 export interface Settings {
   ior: number;
@@ -50,6 +52,9 @@ export interface Settings {
   keyLight: number;
   reflections: boolean;
   reflectionStrength: number;
+  smoothing: number;
+  wrap: number;
+  coatThickness: number;
 }
 export const defaults: Settings = {
   ior: 1.48, distortion: 0.72, frequency: 1.0, roughness: 0.018,
@@ -57,6 +62,7 @@ export const defaults: Settings = {
   detail: 1, seed: 42, preset: 'forest', light: 'studio',
   imperfections: 0.28, lightRotation: 0, keyLight: 2.8,
   reflections: false, reflectionStrength: 0.5,
+  smoothing: 0.8, wrap: 0.7, coatThickness: 0.3,
 };
 const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'avif']);
@@ -95,6 +101,7 @@ export class ResinEngine {
   private warmEnvironment: THREE.Texture;
   private specimen = new THREE.Group();
   private originalSurface: Float32Array;
+  private surface = new ResinSurface();
   private resizeObserver: ResizeObserver;
   private sun = new THREE.DirectionalLight('#fff0c9', 2.8);
   private fill = new THREE.DirectionalLight('#a3d8e9', 1.3);
@@ -125,6 +132,7 @@ export class ResinEngine {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = defaults.exposure;
+    this.renderer.transmissionResolutionScale = 1.5;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.setClearColor('#080b09');
     this.renderer.shadowMap.enabled = true;
@@ -167,8 +175,8 @@ export class ResinEngine {
       clearcoat: 0, clearcoatRoughness: 0.018, specularIntensity: 0, envMapIntensity: 0,
       dispersion: defaults.dispersion, side: THREE.FrontSide,
     });
-    addResinImperfections(this.resinMaterial);
-    const geometry = new THREE.SphereGeometry(1, 200, 144);
+    addResinImperfections(this.resinMaterial, this.surface.texture);
+    const geometry = new THREE.SphereGeometry(1, 320, 240);
     this.originalSurface = new Float32Array(geometry.attributes.position.array);
     this.resin = new THREE.Mesh(geometry, this.resinMaterial);
     this.resin.renderOrder = 10;
@@ -254,7 +262,7 @@ export class ResinEngine {
     this.scene.environment = s.light === 'sunset' ? this.warmEnvironment : this.environment;
     this.fill.color.set(s.light === 'sunset' ? '#c8a6dc' : '#c9d6f2');
     this.scene.environmentRotation.set(0, angle, 0);
-    if (key === 'distortion' || key === 'frequency' || key === 'seed') this.updateSurface();
+    if (key === 'distortion' || key === 'frequency' || key === 'seed' || key === 'smoothing' || key === 'wrap' || key === 'coatThickness') this.updateSurface();
     if (key === 'seed' || key === 'preset') this.buildSpecimen();
     if (key === 'imperfections') {
       const specks = this.specimen.getObjectByName('resin-inclusions') as THREE.InstancedMesh | undefined;
@@ -284,7 +292,25 @@ export class ResinEngine {
   }
 
   private updateSurface() {
-    reshapeResin(this.resin.geometry, this.originalSurface, this.settings);
+    const sources = this.layers.filter(layer => layer.visible && layer.relief?.settings.enabled).map(layer => {
+      layer.object.updateMatrixWorld(true);
+      const inverse = layer.object.matrixWorld.clone().invert().elements;
+      const world = layer.object.matrixWorld.elements;
+      return { relief: layer.relief!, inverse, world };
+    });
+    this.surface.update(this.settings, sources.length ? (x,z) => {
+      let height=-1.4, coverage=0;
+      for (const source of sources) {
+        const m=source.inverse;
+        const lx=m[0]*x+m[8]*z+m[12], lz=m[2]*x+m[10]*z+m[14];
+        const c=source.relief.coverageAt(lx,lz);
+        if(c<=0)continue;
+        const y=source.relief.heightAt(lx,lz)*source.world[5]+source.world[13];
+        if(y>height) {height=y;coverage=c;}
+      }
+      return {height,coverage};
+    } : undefined);
+    this.surface.reshape(this.resin.geometry, this.originalSurface, this.settings.seed);
   }
 
   private buildSpecimen() {
@@ -302,6 +328,7 @@ export class ResinEngine {
     layer.object.position.z = layer.z;
     layer.object.rotation.y = THREE.MathUtils.degToRad(layer.rotation);
     layer.object.rotation.x = THREE.MathUtils.degToRad(layer.tilt);
+    if (layer.relief) this.updateSurface();
     this.needsRender = true;
   }
 
@@ -333,7 +360,25 @@ export class ResinEngine {
     });
     disposeObject(layer.object);
     this.layers.splice(index, 1);
+    if (layer.relief) this.updateSurface();
     this.needsRender = true;
+  }
+
+  setRelief<K extends keyof ReliefSettings>(layer: Layer,key: K,value: ReliefSettings[K]) {
+    if(!layer.relief)return;
+    this.returnToPreview(); layer.relief.set(key,value); this.updateSurface(); this.needsRender=true;
+  }
+
+  embossImage(layer: Layer) {
+    if(!layer.relief)return;
+    this.returnToPreview(); layer.relief.generateEmboss(); this.updateSurface(); this.needsRender=true;
+  }
+
+  async attachDepth(layer: Layer,file: File) {
+    if(!layer.relief)throw new Error('Select an image layer before adding a depth map.');
+    this.returnToPreview(); await layer.relief.loadDepth(file);
+    if(!this.layers.includes(layer)) {disposeObject(layer.object);throw new Error('The image layer was removed before the depth map finished loading.');}
+    this.updateSurface(); this.needsRender=true;
   }
 
   async importFiles(files: File[], onLayer: (layer: Layer) => void, onError: (message: string) => void) {
@@ -377,6 +422,7 @@ export class ResinEngine {
           if (file.size > 120 * 1024 * 1024) throw new Error('This file exceeds the 120 MB import limit. Try a smaller asset.');
           let object: THREE.Object3D;
           let kind: Layer['kind'];
+          let relief: ImageRelief | undefined;
           if (IMAGE_EXTENSIONS.has(extension)) {
             kind = 'image';
             const texture = await new THREE.TextureLoader().loadAsync(urls.get(file.name)!);
@@ -384,11 +430,8 @@ export class ResinEngine {
             texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
             const ratio = texture.image.width / texture.image.height;
             const w = ratio >= 1 ? 7.8 : 7.0 * ratio, h = w / ratio;
-            const plane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({
-              map: texture, roughness: 0.86, side: THREE.DoubleSide, transparent: false, alphaTest: 0.05,
-            }));
-            plane.rotation.x = -Math.PI / 2;
-            object = new THREE.Group(); object.add(plane);
+            relief = new ImageRelief(texture, w, h, this.renderer.capabilities.getMaxAnisotropy());
+            object = relief.group;
           } else if (MODEL_EXTENSIONS.has(extension)) {
             kind = 'model';
             let model: THREE.Object3D;
@@ -428,7 +471,7 @@ export class ResinEngine {
           const layer: Layer = {
             id: crypto.randomUUID(), name: file.name, kind, object, visible: true,
             scale: 1, depth: kind === 'image' ? -0.98 : -0.35,
-            x: 0, z: 0, rotation: 0, tilt: 0, material: 'original',
+            x: 0, z: 0, rotation: 0, tilt: 0, material: 'original', relief,
           };
           if (kind === 'model' && (extension === 'stl' || extension === 'obj' && !files.some(f => ext(f.name) === 'mtl'))) {
             this.setLayerMaterial(layer, 'moss');
@@ -558,7 +601,7 @@ export class ResinEngine {
     this.resizeObserver.disconnect(); this.controls.dispose();
     for (const layer of [...this.layers]) if (layer.kind !== 'specimen') this.removeLayer(layer.id);
     disposeObject(this.specimen); disposeObject(this.resin);
-    this.materialCache.forEach(m => m.dispose()); this.environment.dispose(); this.warmEnvironment.dispose();
+    this.materialCache.forEach(m => m.dispose()); this.environment.dispose(); this.warmEnvironment.dispose(); this.surface.dispose();
     this.sun.shadow.map?.dispose();
     this.renderer.dispose(); this.renderer.domElement.remove();
   }

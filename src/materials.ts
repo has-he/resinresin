@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { surfaceGLSL } from './surface';
 
 export type Pattern = 'moss' | 'mineral' | 'bark';
 export interface OrganicUniforms {
@@ -105,17 +106,20 @@ export function organicMaterial(pattern: Pattern, detail = 1, hue?: string) {
   return material;
 }
 
-export function addResinImperfections(material: THREE.MeshPhysicalMaterial) {
+export function addResinImperfections(material: THREE.MeshPhysicalMaterial, field: THREE.Texture) {
+  material.userData.resinHeightField = field;
   const amount = { value: 0.25 };
   material.userData.imperfections = amount;
   material.customProgramCacheKey = () => 'resin-patches-v2';
   material.onBeforeCompile = shader => {
     shader.uniforms.imperfections = amount;
+    shader.uniforms.resinHeightField = { value: field };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vResinPosition;')
       .replace('#include <project_vertex>', 'vResinPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#include <project_vertex>');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vResinPosition;\nuniform float imperfections;\n${organicGLSL}`)
+      .replace('#include <common>', `#include <common>\nvarying vec3 vResinPosition;\nuniform float imperfections;\n${organicGLSL}\n${surfaceGLSL}`)
+      .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>\nvec3 resinField = resinFieldAt(vResinPosition.xz);\nfloat resinBlend = resinNormalBlend(vResinPosition, resinField.x);\nnormal = normalize(mix(normal, normalize(mat3(viewMatrix) * vec3(-resinField.y, 1.0, -resinField.z)), resinBlend));\nnonPerturbedNormal = normal;`)
       .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor += resinCloud(vResinPosition) * imperfections * 0.32;');
   };
 }
@@ -124,11 +128,4 @@ export function setMaterialDetail(material: THREE.Material, detail: number) {
   if (material.userData.organic) material.userData.organic.organicDetail.value = detail;
 }
 
-export function randomFromSeed(seed: number) {
-  return () => {
-    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
-    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-}
+export { randomFromSeed } from './random';

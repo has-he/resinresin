@@ -15,7 +15,7 @@ app.innerHTML = `
   <main class="editor" data-panel="canvas">
     <aside class="sidebar content-panel" aria-label="Source layers">
       <div class="panel-intro"><span class="eyebrow">01 / COMPOSITION</span><h1>What’s inside.</h1><p>Small worlds, suspended.</p></div>
-      <input id="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.avif,.glb,.gltf,.obj,.stl,.bin,.mtl" hidden>
+      <input id="depth-input" type="file" accept=".png,.jpg,.jpeg,.webp,.avif" hidden><input id="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.avif,.glb,.gltf,.obj,.stl,.bin,.mtl" hidden>
       <button class="upload-zone" id="upload"><span class="upload-icon">${icon('plus', 23)}</span><strong>Add your material</strong><span>Drop images or 3D objects here</span><small>PNG, JPG, WEBP · GLB, GLTF, OBJ, STL</small></button>
       <div class="section-label"><span>SCENE LAYERS</span><span id="layer-count">01</span></div>
       <div id="layers" class="layer-list" role="list" aria-label="Scene layers"></div>
@@ -49,14 +49,15 @@ app.innerHTML = `
       <button id="reset-settings" class="text-button reset-settings">${icon('reset', 14)} Reset material</button>
     </aside>
   </main>
-  <footer class="statusbar"><span><i class="status-dot"></i><span id="render-status">Initializing renderer</span></span><span class="footer-center">A study in light, matter & happy accidents.</span><span id="resolution">RESIN LAB / 0.2</span></footer>
+  <footer class="statusbar"><span><i class="status-dot"></i><span id="render-status">Initializing renderer</span></span><span class="footer-center">A study in light, matter & happy accidents.</span><span id="resolution">RESIN LAB / 0.3</span></footer>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <dialog id="help"><button class="dialog-close" aria-label="Close help">${icon('close', 22)}</button><span class="eyebrow">WELCOME TO RESIN</span><h2>A small world.<br>A different lens.</h2><p>Encapsulate images and 3D objects in an uneven, light-bending resin surface. Everything is rendered on your device.</p><div class="help-steps"><p><b>01 &nbsp; Bring something in.</b>Drop images or models into the canvas. They can coexist as separate layers. Use self-contained GLB files for the easiest import. For glTF and OBJ, select the model and its .bin, .mtl and image files together. Draco-compressed GLBs aren’t supported yet.</p><p><b>02 &nbsp; Make it yours.</b>Select a layer to change its scale, depth, rotation or procedural material. Re-enable the built-in specimen with its eye button. Adjust the resin on the right. Drag to orbit, scroll to zoom, and hold Space to compare.</p><p><b>03 &nbsp; Keep a little light.</b>Preview export saves a PNG at twice the canvas size, up to 4096 pixels. Quality export saves the current accumulated render at its actual rendering resolution. The editor and uploaded files last for this browser session; export before leaving.</p></div><p class="help-footnote">Preview uses fast screen-space transmission. Quality render follows multiple light bounces through the 3D scene and evaluates procedural colour at ray hits. It starts noisy and improves with samples; sharp caustics remain difficult. Surface reflections are optional and off by default; adjust their strength under Optics. Turning them off suppresses surface glare while retaining refraction and lighting on the contents. Colour dispersion is currently a Preview effect. Neither mode adds missing detail to uploaded images.</p><button id="start-creating" class="primary-button">Back to the experiment ${icon('arrow', 16)}</button></dialog>
+  <dialog id="help"><button class="dialog-close" aria-label="Close help">${icon('close', 22)}</button><span class="eyebrow">WELCOME TO RESIN</span><h2>A small world.<br>A different lens.</h2><p>Encapsulate images and 3D objects in an uneven, light-bending resin surface. Everything is rendered on your device.</p><div class="help-steps"><p><b>01 &nbsp; Bring something in.</b>Drop images or models into the canvas. They can coexist as separate layers. Use self-contained GLB files for the easiest import. For glTF and OBJ, select the model and its .bin, .mtl and image files together. Draco-compressed GLBs aren’t supported yet.</p><p><b>02 &nbsp; Make it yours.</b>Select a layer to change its scale, depth, rotation or procedural material. For images, Upload depth creates relief geometry; Quick emboss is a brightness-based artistic shortcut, not AI depth estimation. Surface smoothing softens the resin curves. Follow image relief and Coating thickness adjust its cover. Re-enable the built-in specimen with its eye button. Adjust the resin on the right. Drag to orbit, scroll to zoom, and hold Space to compare.</p><p><b>03 &nbsp; Keep a little light.</b>Preview export saves a PNG at twice the canvas size, up to 4096 pixels. Quality export saves the current accumulated render at its actual rendering resolution. The editor and uploaded files last for this browser session; export before leaving.</p></div><p class="help-footnote">Preview uses fast screen-space transmission. Quality render follows multiple light bounces through the 3D scene and evaluates procedural colour at ray hits. It starts noisy and improves with samples; sharp caustics remain difficult. Surface reflections are optional and off by default; adjust their strength under Optics. Turning them off suppresses surface glare while retaining refraction and lighting on the contents. Colour dispersion is currently a Preview effect. Neither mode adds missing detail to uploaded images.</p><button id="start-creating" class="primary-button">Back to the experiment ${icon('arrow', 16)}</button></dialog>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 let engine: ResinEngine;
 let exporting = false;
+let depthTargetId: string | null = null;
 let selectedId = 'specimen';
 let toastTimer: ReturnType<typeof setTimeout>;
 function toast(message: string, error = false) {
@@ -94,11 +95,14 @@ function renderControls() {
   for (const id of ['#surface-controls', '#optics-controls', '#exposure-control', '#lighting-controls', '#reflection-control']) $(id).replaceChildren();
   const definitions: [keyof Settings, string, string, number, number, number, string?][] = [
     ['distortion', 'Surface relief', '#surface-controls', 0, 1.5, 0.01, 'Changes the depth of the folds and the optical thickness.'],
+    ['smoothing', 'Surface smoothing', '#surface-controls', 0, 1, 0.01, 'Softens narrow lips and channels without blurring the contents.'],
     ['frequency', 'Fold frequency', '#surface-controls', 0.4, 2.5, 0.01],
     ['roughness', 'Roughness', '#surface-controls', 0, 0.35, 0.005],
     ['imperfections', 'Clouding & inclusions', '#surface-controls', 0, 1, 0.01, 'Adds patches of surface roughness and small suspended inclusions.'],
     ['ior', 'Refractive index', '#optics-controls', 1, 2.2, 0.01, '1.00 is air. Around 1.46–1.56 is typical for clear resin.'],
     ['dispersion', 'Dispersion · preview', '#optics-controls', 0, 0.8, 0.01, 'Separates wavelengths subtly at the edges.'],
+    ['wrap', 'Follow image relief', '#surface-controls', 0, 1, 0.01, 'Conforms the resin to enabled image-relief layers.'],
+    ['coatThickness', 'Coating thickness', '#surface-controls', 0.12, 0.7, 0.01],
     ['reflectionStrength', 'Reflection strength', '#reflection-control', 0, 1, 0.01],
     ['exposure', 'Exposure', '#exposure-control', 0.4, 2, 0.01],
     ['lightRotation', 'Light direction', '#lighting-controls', 0, 360, 1],
@@ -187,6 +191,26 @@ function renderLayerEditor() {
     const note = document.createElement('p'); note.className = 'micro-note';
     note.innerHTML = `${icon('leaf', 12)} Geometry + procedural colour & grain.`; editor.append(note);
     return;
+  }
+  if (layer.relief) {
+    const relief=layer.relief;
+    const panel=document.createElement('div'); panel.className='relief-editor';
+    panel.innerHTML=`<div class="selected-label">IMAGE → PHYSICAL RELIEF</div><div class="relief-actions"><button id="upload-depth">${icon('layers',13)} Upload depth</button><button id="emboss-image">${icon('sun',13)} Quick emboss</button></div><p class="depth-source"></p><label class="switch-row" for="relief-enabled"><span>Physical relief</span><input id="relief-enabled" type="checkbox" role="switch"></label><p class="micro-note depth-explanation"></p><div id="relief-controls"></div>`;
+    panel.querySelector('.depth-source')!.textContent=relief.sourceName;
+    panel.querySelector('.depth-explanation')!.textContent=relief.sourceKind==='emboss'?'Emboss uses image brightness, not inferred 3D depth.':relief.hasMap?'White raises the surface. Use an aligned greyscale depth image.':'Upload a depth map, or try an artistic brightness emboss.';
+    const toggle=panel.querySelector<HTMLInputElement>('#relief-enabled')!; toggle.checked=relief.settings.enabled; toggle.disabled=!relief.hasMap;
+    toggle.addEventListener('change',()=>{engine.setRelief(layer,'enabled',toggle.checked);renderLayerEditor();});
+    panel.querySelector('#upload-depth')!.addEventListener('click',()=>{depthTargetId=layer.id;$<HTMLInputElement>('#depth-input').click();});
+    panel.querySelector('#emboss-image')!.addEventListener('click',()=>{engine.embossImage(layer);renderLayerEditor();toast('Brightness emboss generated. Upload depth for more accurate geometry.');});
+    editor.append(panel);
+    if (relief.hasMap) {
+      const controls=panel.querySelector<HTMLElement>('#relief-controls')!;
+      slider(controls,{id:'relief-amount',label:'Relief depth',min:0,max:1.6,step:0.01,value:relief.settings.amount,change:value=>engine.setRelief(layer,'amount',value)});
+      slider(controls,{id:'relief-smoothing',label:'Depth smoothing',min:0,max:1,step:0.01,value:relief.settings.smoothing,change:value=>engine.setRelief(layer,'smoothing',value)});
+      const invert=document.createElement('label');invert.className='relief-invert';invert.innerHTML='<input type="checkbox" id="relief-invert"> Invert depth';
+      invert.querySelector('input')!.checked=relief.settings.invert;
+      invert.querySelector('input')!.addEventListener('change',event=>engine.setRelief(layer,'invert',(event.target as HTMLInputElement).checked));controls.append(invert);
+    }
   }
   const title = document.createElement('div'); title.className = 'selected-label'; title.innerHTML = 'LAYER PROPERTIES';
   editor.append(title);
@@ -281,6 +305,14 @@ requestAnimationFrame(() => {
     $('#overview').addEventListener('click', () => engine.overview());
     renderControls(); renderLayers();
     $('#upload').addEventListener('click', () => $<HTMLInputElement>('#file-input').click());
+    $('#depth-input').addEventListener('change', async event => {
+      const input=event.target as HTMLInputElement, file=input.files?.[0]; input.value='';
+      const layer=engine.layers.find(layer=>layer.id===depthTargetId);
+      if(!file)return;
+      if(!layer){toast('The selected image layer is no longer available.',true);return;}
+      try {await engine.attachDepth(layer,file);selectedId=layer.id;renderLayers();toast('Depth map applied as geometry. Adjust relief and surface smoothing.');}
+      catch(error){toast(error instanceof Error?error.message:'Could not load the depth map.',true);}
+    });
     $('#file-input').addEventListener('change', event => {
       const input = event.target as HTMLInputElement; void importFiles(Array.from(input.files ?? [])); input.value = '';
     });
@@ -363,6 +395,7 @@ requestAnimationFrame(() => {
       get ready() { return engine.renderer.info.render.calls > 0; },
       get renderedFrames() { return engine.renderedFrames; },
       get renderState() { return engine.renderState; },
+      get reliefLayers() { return engine.layers.filter(l=>l.relief).map(l=>({name:l.name,enabled:l.relief!.settings.enabled,source:l.relief!.sourceKind,vertices:l.relief!.top.geometry.attributes.position.count,heightRange:l.relief!.settings.enabled?[l.relief!.top.geometry.boundingBox?.min.y??0,l.relief!.top.geometry.boundingBox?.max.y??0]:[0,0]})); },
     }, configurable: true });
   } catch (error) {
     console.error(error);

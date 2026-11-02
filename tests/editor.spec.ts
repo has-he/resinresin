@@ -30,6 +30,23 @@ async function setSlider(page: Page, id: string, value: string) {
   }, value));
 }
 
+async function imagePNG(page: Page, depth=false, transparent=false) {
+  const base64=await page.evaluate(({depth,transparent})=>{
+    const c=document.createElement('canvas');c.width=192;c.height=144;
+    const ctx=c.getContext('2d')!;
+    if(depth) {
+      const gradient=ctx.createRadialGradient(96,72,0,96,72,90);gradient.addColorStop(0,'white');gradient.addColorStop(1,'black');ctx.fillStyle=gradient;ctx.fillRect(0,0,192,144);
+    } else {
+      const gradient=ctx.createLinearGradient(0,0,192,144);gradient.addColorStop(0,'#47759c');gradient.addColorStop(1,'#dcad6c');ctx.fillStyle=gradient;ctx.fillRect(0,0,192,144);
+      ctx.strokeStyle='#202c32';ctx.lineWidth=3;
+      for(let i=0;i<12;i++){ctx.beginPath();ctx.arc(96,72,10+i*9,0,Math.PI*2);ctx.stroke();}
+    }
+    if(transparent){ctx.globalCompositeOperation='destination-out';ctx.beginPath();ctx.arc(96,72,29,0,Math.PI*2);ctx.fill();}
+    return c.toDataURL('image/png').split(',')[1];
+  },{depth,transparent});
+  return Buffer.from(base64,'base64');
+}
+
 // A self-contained, four-face GLB with an actual mesh and embedded binary buffer.
 function tetrahedronGLB() {
   const positions = new Float32Array([-1,0,-1, 1,0,-1, 0,0,1, 0,1.7,0]);
@@ -254,8 +271,12 @@ test('quality mode accumulates real samples, pauses, exports its native render, 
   await page.getByRole('switch', {name:'Surface reflections'}).check();
   await setSlider(page, 'reflectionStrength', '1');
   await page.locator('.mobile-tabs [data-panel=canvas]').click();
-  await page.locator('#file-input').setInputFiles({name:'quality-sculpture.glb',mimeType:'model/gltf-binary',buffer:tetrahedronGLB()});
-  await expect(page.locator('#layers [role=listitem]')).toHaveCount(2);
+  const photo=await imagePNG(page);
+  await page.locator('#file-input').setInputFiles([{name:'relief-scene.png',mimeType:'image/png',buffer:photo},{name:'quality-sculpture.glb',mimeType:'model/gltf-binary',buffer:tetrahedronGLB()}]);
+  await expect(page.locator('#layers [role=listitem]')).toHaveCount(3);
+  await page.locator('.layer-select').filter({hasText:'relief-scene.png'}).click();
+  await renderedAfter(page,()=>page.locator('#emboss-image').click());
+  await page.locator('.layer-select').filter({hasText:'quality-sculpture.glb'}).click();
   await page.locator('#layer-material').selectOption('bark');
   await page.locator('.mobile-tabs [data-panel=canvas]').click();
   await page.locator('#quality-mode').click();
@@ -306,5 +327,45 @@ test('surface reflections are optional, strength zero suppresses glare, and refr
   await page.getByRole('button', {name:/Mineral bloom/}).click();
   await expect(toggle).not.toBeChecked();
   await expect(page.locator('#reflectionStrength')).toBeDisabled();
+  expect(errors).toEqual([]);
+});
+
+
+test('image depth maps create real relief, smoothing/inversion work, and the resin follows the geometry',async({page})=>{
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+  await ready(page);
+  await page.locator('#file-input').setInputFiles({name:'relief-photo.png',mimeType:'image/png',buffer:await imagePNG(page,false,true)});
+  await expect(page.locator('#layers [role=listitem]')).toHaveCount(2);
+  await expect(page.getByRole('switch',{name:'Physical relief'})).toBeDisabled();
+  await expect(page.locator('#upload')).toBeEnabled();
+  const flat=await pixels(page);
+  await renderedAfter(page,()=>page.getByRole('button',{name:'Quick emboss',exact:true}).click());
+  await expect(page.getByRole('switch',{name:'Physical relief'})).toBeChecked();
+  await expect(page.locator('.depth-explanation')).toContainText('not inferred 3D depth');
+  const geometry=()=>page.evaluate(()=>(window as unknown as {__resin:{reliefLayers:{vertices:number;source:string;heightRange:number[]}[]}}).__resin.reliefLayers[0]);
+  expect((await geometry()).vertices).toBeGreaterThan(10000);
+  expect(difference(flat,await pixels(page))).toBeGreaterThan(2);
+  const chooserPromise=page.waitForEvent('filechooser');await page.getByRole('button',{name:'Upload depth',exact:true}).click();
+  await (await chooserPromise).setFiles({name:'aligned-depth.png',mimeType:'image/png',buffer:await imagePNG(page,true)});
+  await expect(page.locator('.depth-source')).toHaveText('aligned-depth.png');
+  expect((await geometry()).source).toBe('depth');
+  const height=(await geometry()).heightRange;
+  expect(height[1]-height[0]).toBeGreaterThan(0.4);
+  await setSlider(page,'relief-amount','1.2');await setSlider(page,'relief-smoothing','0.9');
+  const raised=await pixels(page);
+  await renderedAfter(page,()=>page.locator('#relief-invert').check());
+  expect(difference(raised,await pixels(page))).toBeGreaterThan(1);
+  await setSlider(page,'wrap','0');const independent=await pixels(page);
+  await setSlider(page,'wrap','1');expect(difference(independent,await pixels(page))).toBeGreaterThan(1);
+  await renderedAfter(page,async()=>{await page.locator('#compare').hover();await page.mouse.down();});
+  const center=await page.locator('#stage canvas').evaluate((source:HTMLCanvasElement)=>{const c=document.createElement('canvas');c.width=source.width;c.height=source.height;const ctx=c.getContext('2d')!;ctx.drawImage(source,0,0);return Array.from(ctx.getImageData(Math.floor(c.width/2),Math.floor(c.height/2),1,1).data);});
+  // Both the front and backing must retain the PNG's transparent cutout.
+  expect(center[0]+center[1]+center[2]).toBeLessThan(60);
+  await renderedAfter(page,()=>page.mouse.up());
+  await renderedAfter(page,()=>page.getByRole('switch',{name:'Physical relief'}).uncheck());
+  expect(difference(flat,await pixels(page))).toBeLessThan(1);
+  await page.screenshot({path:'.local/relief-flat.png'});
+  await renderedAfter(page,()=>page.getByRole('switch',{name:'Physical relief'}).check());
+  await page.screenshot({path:'.local/relief-raised.png'});
   expect(errors).toEqual([]);
 });

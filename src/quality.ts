@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { surfaceGLSL } from './surface';
 import { WebGLPathTracer } from 'three-gpu-pathtracer';
 import { organicGLSL, patternIds, type OrganicUniforms, type Pattern } from './materials';
 
@@ -63,6 +64,7 @@ export class QualityRenderer {
   private geometry: THREE.BufferGeometry[] = [];
   private materials: THREE.Material[] = [];
   private data: THREE.DataTexture | null = null;
+  private borrowedTextures = new Set<THREE.Texture>();
   private previousShaderError: THREE.WebGLRenderer['debug']['onShaderError'];
   private shaderError = false;
   private traceScene = new THREE.Scene();
@@ -121,6 +123,9 @@ export class QualityRenderer {
   private installProceduralMaterials() {
     const internal = this.tracer as unknown as TracerInternals;
     const materials = internal._materials;
+    const field = materials.find(m => m.userData.resinHeightField)?.userData.resinHeightField as THREE.Texture;
+    if (!field) throw new Error('The resin height field is unavailable.');
+    this.borrowedTextures.add(field);
     const data = new Float32Array(Math.max(1, materials.length) * 4 * 4);
     materials.forEach((material, index) => {
       const uniforms = material.userData.organic as OrganicUniforms | undefined;
@@ -153,8 +158,23 @@ export class QualityRenderer {
       }
     `;
     const offset = material.fragmentShader.lastIndexOf(marker);
-    material.fragmentShader = `uniform sampler2D organicMaterials;\n${organicGLSL}\n` + material.fragmentShader.slice(0, offset) + injection + material.fragmentShader.slice(offset + marker.length);
+    material.fragmentShader = `uniform sampler2D organicMaterials;\n${organicGLSL}\n${surfaceGLSL}\n` + material.fragmentShader.slice(0, offset) + injection + material.fragmentShader.slice(offset + marker.length);
+    const scatter = 'scatterRec = bsdfSample( - ray.direction, surf );';
+    if (!material.fragmentShader.includes(scatter)) throw new Error('The quality renderer normal extension is incompatible.');
+    material.fragmentShader = material.fragmentShader.replace(scatter, `
+      if (organic0.a > 3.5) {
+        vec3 resinField = resinFieldAt(organicHit.xz);
+        float blend = resinNormalBlend(organicHit, resinField.x);
+        vec3 continuousNormal = normalize(vec3(-resinField.y, 1.0, -resinField.z)) * surfaceHit.side;
+        surf.normal = normalize(mix(surf.normal, continuousNormal, blend));
+        surf.clearcoatNormal = surf.normal;
+        surf.normalBasis = getBasisFromNormal(surf.normal); surf.normalInvBasis = inverse(surf.normalBasis);
+        surf.clearcoatBasis = surf.normalBasis; surf.clearcoatInvBasis = surf.normalInvBasis;
+      }
+      ${scatter}
+    `);
     material.uniforms.organicMaterials = { value: texture };
+    material.uniforms.resinHeightField = { value: field };
     material.needsUpdate = true;
   }
 
@@ -180,7 +200,7 @@ export class QualityRenderer {
       const resources = new Set<unknown>();
       for (const uniform of Object.values(material.uniforms)) {
         const value = uniform.value;
-        if (value && typeof value.dispose === 'function' && value !== this.traceScene.environment && value !== this.traceScene.background) resources.add(value);
+        if (value && typeof value.dispose === 'function' && value !== this.traceScene.environment && value !== this.traceScene.background && !this.borrowedTextures.has(value)) resources.add(value);
       }
       for (const resource of resources) (resource as {dispose(): void}).dispose();
       material.dispose();
