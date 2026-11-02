@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { randomFromSeed } from './random';
 import { soften } from './height-filter';
+import { ballGLSL } from './ball';
 
 export const RESIN_WIDTH = 10.8;
 export const RESIN_DEPTH = 9.4;
@@ -13,6 +14,7 @@ export type CoatingSource = (x: number, z: number) => CoatingSample;
 // Cubic B-spline filtering is C2 continuous. Interpolate height AND its gradient,
 // rather than feeding triangle-averaged normals into a very strong lens.
 export const surfaceGLSL = /* glsl */ `
+${ballGLSL}
 uniform sampler2D resinHeightField;
 vec4 resinCubicWeights(float f) {
   float f2 = f * f, f3 = f2 * f;
@@ -39,6 +41,13 @@ vec3 resinFieldAt(vec2 worldXZ) {
 float resinNormalBlend(vec3 point, float height) {
   float radius = dot(point.xz / vec2(5.4,4.7), point.xz / vec2(5.4,4.7));
   return (1.0 - smoothstep(0.86,0.94,radius)) * (1.0 - smoothstep(0.025,0.08,abs(point.y-height)));
+}
+vec3 resinSurfaceNormal(vec3 worldPoint,vec3 fallback) {
+  vec3 point=resinLocalPoint(worldPoint);
+  if(resinShape==1) return normalize(resinNormalToWorld*resinBallNormal(point));
+  vec3 field=resinFieldAt(point.xz);
+  vec3 normal=normalize(resinNormalToWorld*vec3(-field.y,1.0,-field.z));
+  return normalize(mix(fallback,normal,resinNormalBlend(point,field.x)));
 }
 `;
 
@@ -174,7 +183,7 @@ export class ResinSurface {
         normal.set(-sample.y,1,-sample.z).normalize(); normals.setXYZ(i,normal.x,normal.y,normal.z);
       } else if (oy <= -0.32) normals.setXYZ(i,0,-1,0);
     }
-    normals.needsUpdate = true; geometry.computeBoundingSphere();
+    normals.needsUpdate = true; geometry.computeBoundingSphere(); geometry.computeBoundingBox();
   }
   dispose() { this.texture.dispose(); }
 }

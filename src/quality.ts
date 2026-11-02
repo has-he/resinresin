@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { surfaceGLSL } from './surface';
+import type { ResinUniforms } from './ball';
 import { WebGLPathTracer } from 'three-gpu-pathtracer';
 import { organicGLSL, patternIds, type OrganicUniforms, type Pattern } from './materials';
 
@@ -123,7 +124,8 @@ export class QualityRenderer {
   private installProceduralMaterials() {
     const internal = this.tracer as unknown as TracerInternals;
     const materials = internal._materials;
-    const field = materials.find(m => m.userData.resinHeightField)?.userData.resinHeightField as THREE.Texture;
+    const resin=materials.find(m => m.userData.resinHeightField);
+    const field = resin?.userData.resinHeightField as THREE.Texture;
     if (!field) throw new Error('The resin height field is unavailable.');
     this.borrowedTextures.add(field);
     const data = new Float32Array(Math.max(1, materials.length) * 4 * 4);
@@ -154,7 +156,7 @@ export class QualityRenderer {
         vec3 organicLight = texelFetch(organicMaterials, ivec2(2, int(materialIndex)), 0).rgb;
         material.color *= organicColorAt(organicHit * organic1.a, organic0.a, organic0.rgb, organic1.rgb, organicLight);
       } else if (organic0.a > 3.5) {
-        material.roughness += resinCloud(organicHit) * organic1.a * 0.32;
+        material.roughness += resinCloud(resinLocalPoint(organicHit)) * organic1.a * 0.32;
       }
     `;
     const offset = material.fragmentShader.lastIndexOf(marker);
@@ -163,10 +165,7 @@ export class QualityRenderer {
     if (!material.fragmentShader.includes(scatter)) throw new Error('The quality renderer normal extension is incompatible.');
     material.fragmentShader = material.fragmentShader.replace(scatter, `
       if (organic0.a > 3.5) {
-        vec3 resinField = resinFieldAt(organicHit.xz);
-        float blend = resinNormalBlend(organicHit, resinField.x);
-        vec3 continuousNormal = normalize(vec3(-resinField.y, 1.0, -resinField.z)) * surfaceHit.side;
-        surf.normal = normalize(mix(surf.normal, continuousNormal, blend));
+        surf.normal = resinSurfaceNormal(organicHit,surf.normal*surfaceHit.side)*surfaceHit.side;
         surf.clearcoatNormal = surf.normal;
         surf.normalBasis = getBasisFromNormal(surf.normal); surf.normalInvBasis = inverse(surf.normalBasis);
         surf.clearcoatBasis = surf.normalBasis; surf.clearcoatInvBasis = surf.normalInvBasis;
@@ -175,6 +174,7 @@ export class QualityRenderer {
     `);
     material.uniforms.organicMaterials = { value: texture };
     material.uniforms.resinHeightField = { value: field };
+    Object.assign(material.uniforms,resin!.userData.resinUniforms as ResinUniforms);
     material.needsUpdate = true;
   }
 

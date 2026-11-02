@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createEnvironment } from './environment';
 import { buildOrganicSpecimen } from './specimen';
 import { ResinSurface } from './surface';
+import { ResinBall, createResinUniforms, resinRotation, type LoopAxis } from './ball';
 import { capturePose, randomizePoses, type LayerPose, type CompositionSnapshot } from './composition';
 import { ImageRelief, type ReliefSettings } from './relief';
 import type { QualityRenderer } from './quality';
@@ -58,6 +59,15 @@ export interface Settings {
   coatThickness: number;
   foldLips: number;
   lipRounding: number;
+  shape: 'pool'|'ball';
+  ballDeformation:number;
+  ballFrequency:number;
+  ballTwist:number;
+  ballFlattening:number;
+  ballScale:number;
+  resinRotationX:number;
+  resinRotationY:number;
+  resinRotationZ:number;
 }
 export const defaults: Settings = {
   ior: 1.48, distortion: 0.72, frequency: 1.0, roughness: 0.018,
@@ -67,6 +77,8 @@ export const defaults: Settings = {
   reflections: false, reflectionStrength: 0.5,
   smoothing: 0.8, wrap: 0.7, coatThickness: 0.3,
   foldLips: 0.3, lipRounding: 0.45,
+  shape:'pool',ballDeformation:1.2,ballFrequency:1,ballTwist:0.5,ballFlattening:0.58,ballScale:1.15,
+  resinRotationX:0,resinRotationY:0,resinRotationZ:0,
 };
 const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'avif']);
@@ -107,6 +119,16 @@ export class ResinEngine {
   private specimenDirty=false;
   private originalSurface: Float32Array;
   private surface = new ResinSurface();
+  private ball=new ResinBall();
+  private resinUniforms=createResinUniforms();
+  private loopPlaying=false;
+  private loopPhase=0;
+  private loopDuration=8;
+  private loopAxis:LoopAxis='y';
+  private loopStartTime:number|null=null;
+  private loopStartPhase=0;
+  private loopUiTime=0;
+  onResinMotion?:()=>void;
   private resizeObserver: ResizeObserver;
   private sun = new THREE.DirectionalLight('#fff0c9', 2.8);
   private fill = new THREE.DirectionalLight('#a3d8e9', 1.3);
@@ -185,7 +207,7 @@ export class ResinEngine {
       clearcoat: 0, clearcoatRoughness: 0.018, specularIntensity: 0, envMapIntensity: 0,
       dispersion: defaults.dispersion, side: THREE.FrontSide,
     });
-    addResinImperfections(this.resinMaterial, this.surface.texture);
+    addResinImperfections(this.resinMaterial, this.surface.texture,this.resinUniforms);
     const geometry = new THREE.SphereGeometry(1, 320, 240);
     this.originalSurface = new Float32Array(geometry.attributes.position.array);
     this.resin = new THREE.Mesh(geometry, this.resinMaterial);
@@ -206,6 +228,12 @@ export class ResinEngine {
 
   private animate = (time: number) => {
     if (this.disposed) return;
+    if(this.loopPlaying) {
+      if(this.loopStartTime===null){this.loopStartTime=time;this.loopStartPhase=this.loopPhase;}
+      this.loopPhase=(this.loopStartPhase+(time-this.loopStartTime)/(this.loopDuration*1000))%1;
+      this.applyResinTransform();this.needsRender=true;
+      if(time-this.loopUiTime>100){this.onResinMotion?.();this.loopUiTime=time;}
+    }
     this.controls.autoRotate = this.motion;
     this.controls.update();
     if (this.quality) {
@@ -263,7 +291,7 @@ export class ResinEngine {
     this.resinMaterial.clearcoatRoughness = s.roughness * 0.8;
     this.resinMaterial.dispersion = s.dispersion;
     this.resinMaterial.attenuationColor.set(s.tint);
-    this.resinMaterial.thickness = 0.65 + s.distortion * 0.95;
+    this.resinMaterial.thickness = s.shape==='ball'?5.4*s.ballScale*(0.65+s.ballFlattening*0.35):0.65 + s.distortion * 0.95;
     this.resinMaterial.userData.imperfections.value = s.imperfections;
     this.renderer.toneMappingExposure = s.exposure;
     this.sun.color.set(s.light === 'sunset' ? '#ffc079' : '#fff0c9');
@@ -273,7 +301,8 @@ export class ResinEngine {
     this.scene.environment = s.light === 'sunset' ? this.warmEnvironment : this.environment;
     this.fill.color.set(s.light === 'sunset' ? '#c8a6dc' : '#c9d6f2');
     this.scene.environmentRotation.set(0, angle, 0);
-    if (key === 'distortion' || key === 'frequency' || key === 'seed' || key === 'smoothing' || key === 'wrap' || key === 'coatThickness' || key === 'foldLips' || key === 'lipRounding') this.updateSurface();
+    if (['distortion','frequency','seed','smoothing','wrap','coatThickness','foldLips','lipRounding','shape','ballDeformation','ballFrequency','ballTwist','ballFlattening'].includes(key)) this.updateSurface();
+    if(['ballScale','resinRotationX','resinRotationY','resinRotationZ'].includes(key))this.applyResinTransform();
     if (key === 'seed' || key === 'preset') this.buildSpecimen();
     if (key === 'imperfections') {
       const specks = this.specimen.getObjectByName('resin-inclusions') as THREE.InstancedMesh | undefined;
@@ -303,6 +332,11 @@ export class ResinEngine {
   }
 
   private updateSurface() {
+    this.resinUniforms.resinShape.value=this.settings.shape==='ball'?1:0;
+    if(this.settings.shape==='ball') {
+      this.ball.update(this.settings,this.resinUniforms);this.ball.reshape(this.resin.geometry,this.originalSurface);
+      this.applyResinTransform();return;
+    }
     const sources = this.layers.filter(layer => layer.visible && layer.relief?.settings.enabled).map(layer => {
       layer.object.updateMatrixWorld(true);
       const inverse = layer.object.matrixWorld.clone().invert().elements;
@@ -322,6 +356,43 @@ export class ResinEngine {
       return {height,coverage};
     } : undefined);
     this.surface.reshape(this.resin.geometry, this.originalSurface, this.settings.seed);
+    this.applyResinTransform();
+  }
+
+  private applyResinTransform() {
+    const s=this.settings;
+    if(s.shape==='ball') {
+      resinRotation(s.resinRotationX,s.resinRotationY,s.resinRotationZ,this.loopAxis,this.loopPhase,this.resin.quaternion);
+      this.resin.position.set(0,-0.45,0);this.resin.scale.setScalar(s.ballScale);
+    }else {this.resin.position.set(0,0,0);this.resin.quaternion.identity();this.resin.scale.setScalar(1);}
+    this.resin.updateMatrixWorld(true);
+    this.resinUniforms.resinWorldToLocal.value.copy(this.resin.matrixWorld).invert();
+    this.resinUniforms.resinNormalToWorld.value.getNormalMatrix(this.resin.matrixWorld);
+    this.controls.maxDistance=s.shape==='ball'?240:22;
+    const far=s.shape==='ball'?500:100;
+    if(this.camera.far!==far){this.camera.far=far;this.camera.updateProjectionMatrix();}
+    this.needsRender=true;
+  }
+
+  get resinMotion() {return {playing:this.loopPlaying,phase:this.loopPhase,duration:this.loopDuration,axis:this.loopAxis};}
+  pauseResinLoop() {
+    if(!this.loopPlaying)return;
+    this.loopPlaying=false;this.loopStartTime=null;this.onResinMotion?.();
+  }
+  toggleResinLoop() {
+    if(this.loopPlaying){this.pauseResinLoop();return;}
+    if(this.settings.shape!=='ball')return;
+    this.returnToPreview();this.motion=false;this.controls.autoRotate=false;
+    this.controls.enableDamping=false;this.controls.update();this.controls.enableDamping=true;
+    this.loopPlaying=true;this.loopStartTime=null;this.onResinMotion?.();
+  }
+  setResinPhase(phase:number) {
+    if(!Number.isFinite(phase))return;
+    this.returnToPreview();this.loopPhase=THREE.MathUtils.clamp(phase,0,1);this.applyResinTransform();this.onResinMotion?.();
+  }
+  setResinLoop(axis:LoopAxis,duration:number) {
+    if(!['x','y','z'].includes(axis)||!Number.isFinite(duration)||duration<2||duration>60)return;
+    this.returnToPreview();this.loopAxis=axis;this.loopDuration=duration;this.applyResinTransform();this.onResinMotion?.();
   }
 
   private buildSpecimen() {
@@ -569,6 +640,7 @@ export class ResinEngine {
   }
 
   returnToPreview() {
+    this.pauseResinLoop();
     if (!this.quality && !this.preparingQuality) return;
     this.qualityGeneration++;
     this.quality?.dispose(); this.quality = null;
@@ -615,10 +687,17 @@ export class ResinEngine {
 
   overview() {
     this.returnToPreview();
+    if(this.settings.shape==='ball') {
+      const bounds=this.resin.geometry.boundingSphere;
+      const radius=((bounds?.radius??6)+(bounds?.center.length()??0))*this.settings.ballScale;
+      const halfFov=THREE.MathUtils.degToRad(this.camera.fov/2),distance=radius/Math.sin(Math.min(halfFov,Math.atan(Math.tan(halfFov)*this.camera.aspect)))*1.05;
+      this.controls.target.set(0,-0.45,0);this.camera.position.set(0,-0.45+distance*0.93,distance*0.3676);this.controls.update();return;
+    }
     this.camera.position.set(0, 12.8, 5.2); this.controls.target.set(0, -0.1, 0); this.controls.update();
   }
 
   async exportImage() {
+    this.pauseResinLoop();
     if (this.preparingQuality) throw new Error('Wait for the quality renderer to start, or switch to Preview.');
     if (this.quality) {
       if (this.quality.samples < 1) throw new Error('Wait for the first full quality sample before exporting.');

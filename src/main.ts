@@ -1,6 +1,7 @@
 import './style.css';
 import { ResinEngine, defaults, type Layer, type LayerMaterial, type Preset, type Settings, type RenderState } from './engine';
 import { icon } from './icons';
+import type { LoopAxis } from './ball';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -36,12 +37,13 @@ app.innerHTML = `
         <div class="stage-bottom"><span class="coordinate">SEED 0042 · FOREST STUDY</span><button id="fullscreen" class="canvas-icon" title="Toggle fullscreen" aria-label="Toggle fullscreen">${icon('expand', 17)}</button></div>
         <div id="quality-progress" class="quality-progress" hidden><span class="quality-indicator"></span><div><strong id="quality-state">Preparing light paths</strong><small id="quality-hint">Drag or edit to return to Preview.</small><progress id="quality-meter" max="256" value="0" aria-label="Quality render samples"></progress></div><button id="quality-pause" aria-label="Pause quality render" title="Pause quality render">${icon('pause', 14)}</button><button id="quality-cancel" aria-label="Return to preview" title="Return to preview">${icon('close', 15)}</button></div><div id="drop-overlay" class="drop-overlay" hidden>${icon('upload', 36)}<strong>Something new, suspended.</strong><span>Drop images, models, or both.</span></div>
       </div>
-      <div class="canvas-toolbar"><div class="interaction-hint">${icon('orbit', 15)}<span>Drag to orbit <b>·</b> Scroll to explore</span></div><div class="canvas-actions"><button id="reset-view" class="tool-button" title="Reset camera" aria-label="Reset camera">${icon('reset', 16)}</button><button id="previous-composition-canvas" class="tool-button previous-icon" aria-label="Previous composition" title="Previous composition" disabled>${icon('chevron',14)}</button><button id="next-composition-canvas" class="tool-button" aria-label="Next composition" title="Next composition (R)">${icon('shuffle',14)}<span>Next</span></button><button id="overview" class="tool-button" title="Frame the whole specimen" aria-label="Frame the whole specimen">${icon('expand', 14)}<span>Overview</span></button><button id="motion" class="tool-button" aria-pressed="false">${icon('play', 14)}<span>Orbit</span></button><span class="tool-divider"></span><button id="compare" class="tool-button compare-button" title="Hold to see the contents without resin. Shortcut: Space">${icon('compare', 16)}<span>Hold to compare</span></button></div></div>
+      <div class="canvas-toolbar"><div class="interaction-hint">${icon('orbit', 15)}<span>Drag to orbit <b>·</b> Scroll to explore</span></div><div class="canvas-actions"><button id="reset-view" class="tool-button" title="Reset camera" aria-label="Reset camera">${icon('reset', 16)}</button><button id="previous-composition-canvas" class="tool-button previous-icon" aria-label="Previous composition" title="Previous composition" disabled>${icon('chevron',14)}</button><button id="next-composition-canvas" class="tool-button" aria-label="Next composition" title="Next composition (R)">${icon('shuffle',14)}<span>Next</span></button><button id="resin-loop-canvas" class="tool-button" aria-label="Play resin loop" aria-pressed="false" hidden>${icon('play',14)}<span>Loop resin</span></button><button id="overview" class="tool-button" title="Frame the whole specimen" aria-label="Frame the whole specimen">${icon('expand', 14)}<span>Overview</span></button><button id="motion" class="tool-button" aria-pressed="false">${icon('play', 14)}<span>Orbit</span></button><span class="tool-divider"></span><button id="compare" class="tool-button compare-button" title="Hold to see the contents without resin. Shortcut: Space">${icon('compare', 16)}<span>Hold to compare</span></button></div></div>
       <div class="workspace-caption"><span>Nature, through a different lens.</span><span>MAKE SOMETHING UNEXPECTED ↗</span></div>
     </section>
     <aside class="sidebar material-panel" aria-label="Resin settings">
       <div class="panel-intro"><span class="eyebrow">02 / MATERIAL</span><h2>Shape the light.</h2><p>A little imperfection goes a long way.</p></div>
       <div class="material-card"><span class="glass-swatch"></span><div><strong>Organic resin</strong><span>Transmissive · procedural surface</span></div><span class="material-dot"></span></div>
+      <details class="control-section resin-form" open><summary>Resin form <span>↻</span></summary><div class="control-content"><label class="field-label" for="resin-shape">Shape</label><div class="select-wrap"><select id="resin-shape"><option value="pool">Pooled resin</option><option value="ball">Deformable ball</option></select></div><p id="shape-help" class="form-hint"></p><div id="ball-settings" hidden><div id="ball-controls"></div><span class="field-label rotation-heading">SHELL ORIENTATION</span><div id="rotation-controls"></div><div class="loop-options"><label>Turn axis<select id="resin-loop-axis" aria-label="Resin loop axis"><option value="y">Y · vertical</option><option value="x">X · horizontal</option><option value="z">Z · depth</option></select></label><label>One turn<select id="resin-loop-duration" aria-label="Loop duration"><option value="2">2 seconds</option><option value="4">4 seconds</option><option value="8" selected>8 seconds</option><option value="12">12 seconds</option><option value="20">20 seconds</option><option value="30">30 seconds</option></select></label></div><div id="resin-phase-control"></div><div class="loop-actions"><button id="resin-loop" aria-pressed="false">Play 360° loop</button><button id="resin-loop-reset" title="Return to the start angle">Start angle</button></div><p class="form-hint" id="resin-loop-status" role="status">Only the resin moves. The contents, light and camera stay fixed.</p></div></div></details>
       <details class="control-section" open><summary>Surface <span>01</span></summary><div class="control-content" id="surface-controls"></div></details>
       <details class="control-section" open><summary>Optics <span>02</span></summary><div class="control-content" id="optics-controls"></div><div class="reflection-settings"><label class="switch-row" for="reflections"><span>Surface reflections</span><input id="reflections" type="checkbox" role="switch" aria-describedby="reflection-hint"></label><p id="reflection-hint">Optional white highlights on the resin.</p><div id="reflection-control"></div></div></details>
       <details class="control-section" open><summary>Atmosphere <span>03</span></summary><div class="control-content"><label class="field-label" for="light">Lighting environment</label><div class="select-wrap"><select id="light"><option value="studio">Reference · overhead strip</option><option value="sunset">Warm afternoon</option></select>${icon('down', 13)}</div><div id="exposure-control"></div><div id="lighting-controls"></div><div class="color-control"><label for="tint">Resin tint</label><div><span id="tint-value">E3E9CD</span><input id="tint" type="color" value="#e3e9cd" aria-label="Resin tint"></div></div></div></details>
@@ -50,9 +52,9 @@ app.innerHTML = `
       <button id="reset-settings" class="text-button reset-settings">${icon('reset', 14)} Reset material</button>
     </aside>
   </main>
-  <footer class="statusbar"><span><i class="status-dot"></i><span id="render-status">Initializing renderer</span></span><span class="footer-center">A study in light, matter & happy accidents.</span><span id="resolution">RESIN LAB / 0.4</span></footer>
+  <footer class="statusbar"><span><i class="status-dot"></i><span id="render-status">Initializing renderer</span></span><span class="footer-center">A study in light, matter & happy accidents.</span><span id="resolution">RESIN LAB / 0.5</span></footer>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <dialog id="help"><button class="dialog-close" aria-label="Close help">${icon('close', 22)}</button><span class="eyebrow">WELCOME TO RESIN</span><h2>A small world.<br>A different lens.</h2><p>Encapsulate images and 3D objects in an uneven, light-bending resin surface. Everything is rendered on your device.</p><div class="help-steps"><p><b>01 &nbsp; Bring something in.</b>Drop images or models into the canvas. They can coexist as separate layers. Use self-contained GLB files for the easiest import. For glTF and OBJ, select the model and its .bin, .mtl and image files together. Draco-compressed GLBs aren’t supported yet.</p><p><b>02 &nbsp; Make it yours.</b>Select a layer to change its scale, depth, rotation or procedural material. For images, Upload depth creates relief geometry; Quick emboss is a brightness-based artistic shortcut, not AI depth estimation. Next composition or R explores arrangements while keeping lighting and camera fixed. Previous restores an earlier arrangement; Keep uploaded layers in place protects their placement. Surface smoothing softens the broad curves; Fold lips and Lip rounding add tighter curved creases. Follow image relief and Coating thickness adjust its cover. Re-enable the built-in specimen with its eye button. Adjust the resin on the right. Drag to orbit, scroll to zoom, and hold Space to compare.</p><p><b>03 &nbsp; Keep a little light.</b>Preview export saves a PNG at twice the canvas size, up to 4096 pixels. Quality export saves the current accumulated render at its actual rendering resolution. The editor and uploaded files last for this browser session; export before leaving.</p></div><p class="help-footnote">Preview uses fast screen-space transmission. Quality render follows multiple light bounces through the 3D scene and evaluates procedural colour at ray hits. It starts noisy and improves with samples; sharp caustics remain difficult. Surface reflections are optional and off by default; adjust their strength under Optics. Turning them off suppresses surface glare while retaining refraction and lighting on the contents. Colour dispersion is currently a Preview effect. Neither mode adds missing detail to uploaded images.</p><button id="start-creating" class="primary-button">Back to the experiment ${icon('arrow', 16)}</button></dialog>
+  <dialog id="help"><button class="dialog-close" aria-label="Close help">${icon('close', 22)}</button><span class="eyebrow">WELCOME TO RESIN</span><h2>A small world.<br>A different lens.</h2><p>Encapsulate images and 3D objects in an uneven, light-bending resin surface. Everything is rendered on your device.</p><div class="help-steps"><p><b>01 &nbsp; Bring something in.</b>Drop images or models into the canvas. They can coexist as separate layers. Use self-contained GLB files for the easiest import. For glTF and OBJ, select the model and its .bin, .mtl and image files together. Draco-compressed GLBs aren’t supported yet.</p><p><b>02 &nbsp; Make it yours.</b>Select a layer to change its scale, depth, rotation or procedural material. For images, Upload depth creates relief geometry; Quick emboss is a brightness-based artistic shortcut, not AI depth estimation. Next composition or R explores arrangements while keeping lighting and camera fixed. Previous restores an earlier arrangement; Keep uploaded layers in place protects their placement. Choose Deformable ball under Resin form for a closed, sculptural lens. Deformation, warp scale, twist and squash shape it; shell orientation turns it around stationary sources. Play 360° loop repeats a full turn on your chosen axis. Scrub Loop phase to explore individual angles. Quality render and image export pause the loop at its current pose. Surface smoothing softens the broad curves; Fold lips and Lip rounding add tighter curved creases. Follow image relief and Coating thickness adjust its cover. Re-enable the built-in specimen with its eye button. Adjust the resin on the right. Drag to orbit, scroll to zoom, and hold Space to compare.</p><p><b>03 &nbsp; Keep a little light.</b>Preview export saves a PNG at twice the canvas size, up to 4096 pixels. Quality export saves the current accumulated render at its actual rendering resolution. The editor and uploaded files last for this browser session; export before leaving.</p></div><p class="help-footnote">Preview uses fast screen-space transmission. Quality render follows multiple light bounces through the 3D scene and evaluates procedural colour at ray hits. It starts noisy and improves with samples; sharp caustics remain difficult. Surface reflections are optional and off by default; adjust their strength under Optics. Turning them off suppresses surface glare while retaining refraction and lighting on the contents. Colour dispersion is currently a Preview effect. Neither mode adds missing detail to uploaded images.</p><button id="start-creating" class="primary-button">Back to the experiment ${icon('arrow', 16)}</button></dialog>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
@@ -94,8 +96,16 @@ function slider(parent: HTMLElement, options: SliderOptions) {
 }
 
 function renderControls() {
-  for (const id of ['#surface-controls', '#optics-controls', '#exposure-control', '#lighting-controls', '#reflection-control']) $(id).replaceChildren();
+  for (const id of ['#surface-controls', '#optics-controls', '#exposure-control', '#lighting-controls', '#reflection-control', '#ball-controls', '#rotation-controls', '#resin-phase-control']) $(id).replaceChildren();
   const definitions: [keyof Settings, string, string, number, number, number, string?][] = [
+    ['ballDeformation', 'Deformation', '#ball-controls', 0, 2, 0.01, 'Pushes smooth bulges and dents to extreme shapes.'],
+    ['ballFrequency', 'Warp scale', '#ball-controls', 0.4, 2.5, 0.01],
+    ['ballTwist', 'Twist', '#ball-controls', -3, 3, 0.01],
+    ['ballFlattening', 'Squash / stretch', '#ball-controls', 0.3, 1.3, 0.01],
+    ['ballScale', 'Ball size', '#ball-controls', 0.5, 1.8, 0.01, 'Changes the shell size while leaving the contents in place.'],
+    ['resinRotationX', 'Tilt X', '#rotation-controls', -180, 180, 0.1],
+    ['resinRotationY', 'Rotate Y', '#rotation-controls', -180, 180, 0.1],
+    ['resinRotationZ', 'Tilt Z', '#rotation-controls', -180, 180, 0.1],
     ['distortion', 'Surface relief', '#surface-controls', 0, 1.5, 0.01, 'Changes the depth of the folds and the optical thickness.'],
     ['smoothing', 'Surface smoothing', '#surface-controls', 0, 1, 0.01, 'Softens the broad pools and channels. Lip rounding controls crease tips separately.'],
     ['foldLips', 'Fold lips', '#surface-controls', 0, 1, 0.01, 'Adds slender rounded ridges and adjacent recesses to the resin.'],
@@ -116,6 +126,12 @@ function renderControls() {
     slider($(parent), { id: key, label, min, max, step, value: Number(engine.settings[key]), hint,
       change: value => engine.set(key, value as never) });
   }
+  slider($('#resin-phase-control'),{id:'resin-loop-phase',label:'Loop phase',min:0,max:360,step:0.1,value:engine.resinMotion.phase*360,format:v=>`${v.toFixed(1)}°`,change:value=>engine.setResinPhase(value/360)});
+  const ball=engine.settings.shape==='ball';
+  $('#ball-settings').hidden=!ball;
+  $<HTMLSelectElement>('#resin-shape').value=engine.settings.shape;
+  $('#shape-help').textContent=ball?'A closed lens. Deform and rotate the shell around stationary sources.':'Broad resin pools that can follow image relief.';
+  for(const id of ['distortion','frequency','wrap','coatThickness']) $(`#${id}`).closest<HTMLElement>('.slider-control')!.hidden=ball;
   updateCompositionControls();
   syncReflectionControls();
   $('#tint-value').textContent = engine.settings.tint.slice(1).toUpperCase();
@@ -129,6 +145,27 @@ function renderControls() {
   });
 }
 
+function updateLoopControls() {
+  const state=engine.resinMotion,ball=engine.settings.shape==='ball',busy=compositionBusy||exporting;
+  $('#motion').hidden=ball;$('#resin-loop-canvas').hidden=!ball;
+  for(const id of ['#resin-loop','#resin-loop-canvas']) {
+    const button=$<HTMLButtonElement>(id);button.disabled=busy||!ball;button.setAttribute('aria-pressed',String(state.playing));
+    if(button.dataset.playing!==String(state.playing)){button.innerHTML=`${icon(state.playing?'pause':'play',14)}<span>${id==='#resin-loop'?(state.playing?'Pause loop':'Play 360° loop'):(state.playing?'Pause resin':'Loop resin')}</span>`;button.dataset.playing=String(state.playing);}
+    button.setAttribute('aria-label',state.playing?'Pause resin loop':'Play resin loop');
+  }
+  for(const id of ['#resin-shape','#resin-loop-axis','#resin-loop-duration','#resin-loop-reset']) ($<HTMLButtonElement|HTMLSelectElement>(id)).disabled=busy;
+  $<HTMLSelectElement>('#resin-loop-axis').value=state.axis;
+  $<HTMLSelectElement>('#resin-loop-duration').value=String(state.duration);
+  const phase=$<HTMLInputElement>('#resin-loop-phase');
+  if(phase&&document.activeElement!==phase) {
+    phase.value=String(state.phase*360);phase.style.setProperty('--fill',`${state.phase*100}%`);
+    $<HTMLOutputElement>('output[for=resin-loop-phase]').value=`${(state.phase*360).toFixed(1)}°`;
+  }
+  const status=state.playing?`One turn every ${state.duration}s. Only the resin moves.`:'Only the resin moves. The contents, light and camera stay fixed.';
+  if($('#resin-loop-status').textContent!==status)$('#resin-loop-status').textContent=status;
+  if(state.playing){$('#motion').setAttribute('aria-pressed','false');$('#motion').innerHTML=`${icon('play',14)}<span>Orbit</span>`;}
+}
+
 function updateCompositionControls() {
   const busy=compositionBusy||exporting;
   for(const id of ['#randomize-composition','#next-composition-canvas','#shuffle']) $<HTMLButtonElement>(id).disabled=busy;
@@ -138,7 +175,7 @@ function updateCompositionControls() {
   $('#seed-value').textContent=String(engine.settings.seed).padStart(4,'0');
   $('.coordinate').textContent=`SEED ${String(engine.settings.seed).padStart(4,'0')} · ${engine.settings.preset.toUpperCase()} STUDY`;
   const lock=$<HTMLInputElement>('#keep-uploaded');lock.checked=engine.keepUploadedLayers;lock.disabled=busy||!engine.layers.some(l=>l.kind!=='specimen');
-  $<HTMLButtonElement>('#quality-mode').disabled=busy;
+  $<HTMLButtonElement>('#quality-mode').disabled=busy;updateLoopControls();
 }
 
 async function exploreComposition(previous=false,requestedSeed?:number) {
@@ -168,6 +205,7 @@ function syncReflectionControls() {
 }
 
 function updateRenderState(state: RenderState) {
+  updateLoopControls();
   const quality = state.mode === 'quality';
   $('#quality-progress').hidden = !quality;
   $('#quality-mode').setAttribute('aria-pressed', String(quality));
@@ -341,6 +379,11 @@ requestAnimationFrame(() => {
     $('#quality-scale').addEventListener('change', event => engine.setQualityScale(Number((event.target as HTMLSelectElement).value)));
     $('#overview').addEventListener('click', () => engine.overview());
     renderControls(); renderLayers();
+    engine.onResinMotion=updateLoopControls;
+    $('#resin-shape').addEventListener('change',event=>{engine.set('shape',(event.target as HTMLSelectElement).value as Settings['shape']);renderControls();});
+    for(const id of ['#resin-loop','#resin-loop-canvas'])$(id).addEventListener('click',()=>engine.toggleResinLoop());
+    for(const id of ['#resin-loop-axis','#resin-loop-duration'])$(id).addEventListener('change',()=>engine.setResinLoop($<HTMLSelectElement>('#resin-loop-axis').value as LoopAxis,Number($<HTMLSelectElement>('#resin-loop-duration').value)));
+    $('#resin-loop-reset').addEventListener('click',()=>engine.setResinPhase(0));
     $('#upload').addEventListener('click', () => $<HTMLInputElement>('#file-input').click());
     $('#depth-input').addEventListener('change', async event => {
       const input=event.target as HTMLInputElement, file=input.files?.[0]; input.value='';
@@ -440,6 +483,7 @@ requestAnimationFrame(() => {
       get renderedFrames() { return engine.renderedFrames; },
       get renderState() { return engine.renderState; },
       get composition() {return {camera:{position:engine.camera.position.toArray(),target:engine.controls.target.toArray()},canPrevious:engine.canPreviousComposition,keepUploaded:engine.keepUploadedLayers,poses:engine.layers.filter(l=>l.kind!=='specimen').map(l=>({name:l.name,x:l.x,z:l.z,scale:l.scale,depth:l.depth,rotation:l.rotation,tilt:l.tilt}))};},
+      get resinMotion() {const p=engine.resin.geometry.attributes.position;return {...engine.resinMotion,matrix:engine.resin.matrixWorld.toArray(),geometry:[0,900,8000,18000,44000,70000].flatMap(i=>[p.getX(i),p.getY(i),p.getZ(i)])};},
       get reliefLayers() { return engine.layers.filter(l=>l.relief).map(l=>({name:l.name,enabled:l.relief!.settings.enabled,source:l.relief!.sourceKind,vertices:l.relief!.top.geometry.attributes.position.count,heightRange:l.relief!.settings.enabled?[l.relief!.top.geometry.boundingBox?.min.y??0,l.relief!.top.geometry.boundingBox?.max.y??0]:[0,0]})); },
     }, configurable: true });
   } catch (error) {
