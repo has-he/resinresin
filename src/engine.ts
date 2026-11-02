@@ -48,12 +48,15 @@ export interface Settings {
   imperfections: number;
   lightRotation: number;
   keyLight: number;
+  reflections: boolean;
+  reflectionStrength: number;
 }
 export const defaults: Settings = {
   ior: 1.48, distortion: 0.72, frequency: 1.0, roughness: 0.018,
   dispersion: 0.045, tint: '#f3eedc', exposure: 1.0,
   detail: 1, seed: 42, preset: 'forest', light: 'studio',
   imperfections: 0.28, lightRotation: 0, keyLight: 2.8,
+  reflections: false, reflectionStrength: 0.5,
 };
 const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'avif']);
@@ -161,7 +164,7 @@ export class ResinEngine {
       color: '#ffffff', metalness: 0, roughness: defaults.roughness,
       transmission: 1, thickness: 2.4, ior: defaults.ior,
       attenuationColor: new THREE.Color(defaults.tint), attenuationDistance: 12,
-      clearcoat: 0.35, clearcoatRoughness: 0.018, envMapIntensity: 1.0,
+      clearcoat: 0, clearcoatRoughness: 0.018, specularIntensity: 0, envMapIntensity: 0,
       dispersion: defaults.dispersion, side: THREE.FrontSide,
     });
     addResinImperfections(this.resinMaterial);
@@ -232,6 +235,10 @@ export class ResinEngine {
     this.needsRender = true;
     this.settings[key] = value;
     const s = this.settings;
+    const highlights = s.reflections ? s.reflectionStrength : 0;
+    this.resinMaterial.specularIntensity = highlights;
+    this.resinMaterial.clearcoat = 0.35 * highlights;
+    this.resinMaterial.envMapIntensity = s.reflections ? 1 : 0;
     this.resinMaterial.ior = s.ior;
     this.resinMaterial.roughness = s.roughness;
     this.resinMaterial.clearcoatRoughness = s.roughness * 0.8;

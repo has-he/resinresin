@@ -249,6 +249,11 @@ test('quality mode accumulates real samples, pauses, exports its native render, 
   await page.waitForFunction(previous => (window as unknown as { __resin: {renderState: {samples: number}} }).__resin.renderState.samples > previous, paused);
   await page.getByRole('button', {name:'Return to preview',exact:true}).click();
   expect((await state()).mode).toBe('preview');
+  // Trace both reflection settings: the specimen above was rendered with glare off.
+  await page.locator('.mobile-tabs [data-panel=material]').click();
+  await page.getByRole('switch', {name:'Surface reflections'}).check();
+  await setSlider(page, 'reflectionStrength', '1');
+  await page.locator('.mobile-tabs [data-panel=canvas]').click();
   await page.locator('#file-input').setInputFiles({name:'quality-sculpture.glb',mimeType:'model/gltf-binary',buffer:tetrahedronGLB()});
   await expect(page.locator('#layers [role=listitem]')).toHaveCount(2);
   await page.locator('#layer-material').selectOption('bark');
@@ -261,5 +266,45 @@ test('quality mode accumulates real samples, pauses, exports its native render, 
   await page.locator('#reset-view').click();
   await expect(page.locator('#preview-mode')).toHaveAttribute('aria-pressed','true');
   expect((await state()).mode).toBe('preview');
+  expect(errors).toEqual([]);
+});
+
+
+test('surface reflections are optional, strength zero suppresses glare, and refraction remains active', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(e.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  await ready(page);
+  const toggle = page.getByRole('switch', {name:'Surface reflections'});
+  await expect(toggle).not.toBeChecked();
+  await expect(page.locator('#reflectionStrength')).toBeDisabled();
+  const without = await pixels(page);
+  const brightness = () => page.locator('#stage canvas').evaluate((source: HTMLCanvasElement) => {
+    const copy = document.createElement('canvas'); copy.width = source.width; copy.height = source.height;
+    const context = copy.getContext('2d')!; context.drawImage(source, 0, 0);
+    const {data} = context.getImageData(0, 0, copy.width, copy.height);
+    let bright = 0, total = 0;
+    for (let i = 0; i < data.length; i += 16) {
+      if (data[i] > 225 && data[i+1] > 225 && data[i+2] > 210) bright++;
+      total++;
+    }
+    return bright / total;
+  });
+  const originalBright = await brightness();
+  await renderedAfter(page, () => toggle.check());
+  await expect(page.locator('#reflectionStrength')).toBeEnabled();
+  await setSlider(page, 'reflectionStrength', '1');
+  expect(difference(without, await pixels(page))).toBeGreaterThan(2);
+  expect(await brightness()).toBeGreaterThan(originalBright + 0.0005);
+  await setSlider(page, 'reflectionStrength', '0');
+  expect(difference(without, await pixels(page))).toBeLessThan(0.5);
+  // The glare switch must preserve the bending of light through the resin.
+  await renderedAfter(page, async () => { await page.locator('#compare').hover(); await page.mouse.down(); });
+  expect(difference(without, await pixels(page))).toBeGreaterThan(6);
+  await renderedAfter(page, () => page.mouse.up());
+  await renderedAfter(page, () => toggle.uncheck());
+  await page.getByRole('button', {name:/Mineral bloom/}).click();
+  await expect(toggle).not.toBeChecked();
+  await expect(page.locator('#reflectionStrength')).toBeDisabled();
   expect(errors).toEqual([]);
 });
