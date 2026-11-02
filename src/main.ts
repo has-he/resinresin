@@ -1,5 +1,5 @@
 import './style.css';
-import { ResinEngine, defaults, type Layer, type LayerMaterial, type Preset, type Settings } from './engine';
+import { ResinEngine, defaults, type Layer, type LayerMaterial, type Preset, type Settings, type RenderState } from './engine';
 import { icon } from './icons';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -28,14 +28,14 @@ app.innerHTML = `
       <div class="local-note">${icon('cube', 15)}<p>Your files stay in your browser.<br>No uploads. No account. Just play.</p></div>
     </aside>
     <section class="workspace" aria-label="Live canvas">
-      <div class="workspace-heading"><div class="canvas-title"><span class="live-dot"></span>LIVE CANVAS</div><div class="view-label">3D MATERIAL STUDY ${icon('orbit', 15)}</div></div>
+      <div class="workspace-heading"><div class="canvas-title"><span class="live-dot"></span>LIVE CANVAS</div><div class="render-mode" aria-label="Render mode"><button id="preview-mode" aria-pressed="true">Preview</button><button id="quality-mode" aria-pressed="false">Quality render ${icon('sun', 12)}</button></div></div>
       <div id="stage" class="stage">
         <div class="stage-top"><div><span class="stage-kicker">ORGANIC EXPLORATIONS</span><span class="stage-name" id="specimen-name">Forest floor</span></div><span class="stage-badge">REALTIME / WEBGL</span></div>
         <div class="loading" id="loading"><span class="loading-ring"></span><p>Pouring a little world…</p></div>
         <div class="stage-bottom"><span class="coordinate">SEED 0042 · FOREST STUDY</span><button id="fullscreen" class="canvas-icon" title="Toggle fullscreen" aria-label="Toggle fullscreen">${icon('expand', 17)}</button></div>
-        <div id="drop-overlay" class="drop-overlay" hidden>${icon('upload', 36)}<strong>Something new, suspended.</strong><span>Drop images, models, or both.</span></div>
+        <div id="quality-progress" class="quality-progress" hidden><span class="quality-indicator"></span><div><strong id="quality-state">Preparing light paths</strong><small id="quality-hint">Drag or edit to return to Preview.</small><progress id="quality-meter" max="256" value="0" aria-label="Quality render samples"></progress></div><button id="quality-pause" aria-label="Pause quality render" title="Pause quality render">${icon('pause', 14)}</button><button id="quality-cancel" aria-label="Return to preview" title="Return to preview">${icon('close', 15)}</button></div><div id="drop-overlay" class="drop-overlay" hidden>${icon('upload', 36)}<strong>Something new, suspended.</strong><span>Drop images, models, or both.</span></div>
       </div>
-      <div class="canvas-toolbar"><div class="interaction-hint">${icon('orbit', 15)}<span>Drag to orbit <b>·</b> Scroll to explore</span></div><div class="canvas-actions"><button id="reset-view" class="tool-button" title="Reset camera" aria-label="Reset camera">${icon('reset', 16)}</button><button id="motion" class="tool-button" aria-pressed="false">${icon('play', 14)}<span>Orbit</span></button><span class="tool-divider"></span><button id="compare" class="tool-button compare-button" title="Hold to see the contents without resin. Shortcut: Space">${icon('compare', 16)}<span>Hold to compare</span></button></div></div>
+      <div class="canvas-toolbar"><div class="interaction-hint">${icon('orbit', 15)}<span>Drag to orbit <b>·</b> Scroll to explore</span></div><div class="canvas-actions"><button id="reset-view" class="tool-button" title="Reset camera" aria-label="Reset camera">${icon('reset', 16)}</button><button id="overview" class="tool-button" title="Frame the whole specimen" aria-label="Frame the whole specimen">${icon('expand', 14)}<span>Overview</span></button><button id="motion" class="tool-button" aria-pressed="false">${icon('play', 14)}<span>Orbit</span></button><span class="tool-divider"></span><button id="compare" class="tool-button compare-button" title="Hold to see the contents without resin. Shortcut: Space">${icon('compare', 16)}<span>Hold to compare</span></button></div></div>
       <div class="workspace-caption"><span>Nature, through a different lens.</span><span>MAKE SOMETHING UNEXPECTED ↗</span></div>
     </section>
     <aside class="sidebar material-panel" aria-label="Resin settings">
@@ -43,18 +43,20 @@ app.innerHTML = `
       <div class="material-card"><span class="glass-swatch"></span><div><strong>Organic resin</strong><span>Transmissive · procedural surface</span></div><span class="material-dot"></span></div>
       <details class="control-section" open><summary>Surface <span>01</span></summary><div class="control-content" id="surface-controls"></div></details>
       <details class="control-section" open><summary>Optics <span>02</span></summary><div class="control-content" id="optics-controls"></div></details>
-      <details class="control-section" open><summary>Atmosphere <span>03</span></summary><div class="control-content"><label class="field-label" for="light">Lighting environment</label><div class="select-wrap"><select id="light"><option value="studio">Soft studio</option><option value="sunset">Warm afternoon</option></select>${icon('down', 13)}</div><div id="exposure-control"></div><div class="color-control"><label for="tint">Resin tint</label><div><span id="tint-value">E3E9CD</span><input id="tint" type="color" value="#e3e9cd" aria-label="Resin tint"></div></div></div></details>
+      <details class="control-section" open><summary>Atmosphere <span>03</span></summary><div class="control-content"><label class="field-label" for="light">Lighting environment</label><div class="select-wrap"><select id="light"><option value="studio">Reference · overhead strip</option><option value="sunset">Warm afternoon</option></select>${icon('down', 13)}</div><div id="exposure-control"></div><div id="lighting-controls"></div><div class="color-control"><label for="tint">Resin tint</label><div><span id="tint-value">E3E9CD</span><input id="tint" type="color" value="#e3e9cd" aria-label="Resin tint"></div></div></div></details>
+      <div class="quality-options"><label class="field-label" for="quality-scale">Quality render resolution</label><div class="select-wrap"><select id="quality-scale"><option value="1">100% · native resolution</option><option value="0.5">50% · faster accumulation</option></select>${icon('down', 13)}</div><label class="field-label" for="quality-samples">Sample target</label><div class="select-wrap"><select id="quality-samples"><option value="128">128 · quick study</option><option value="256" selected>256 · fine</option><option value="512">512 · cleaner export</option></select>${icon('down', 13)}</div><p>Quality traces through the 3D scene. Let samples accumulate, then export. Drag or edit to return to Preview.</p></div>
       <div class="seed-row"><div><span class="eyebrow">A HAPPY ACCIDENT</span><span>Seed <b id="seed-value">0042</b></span></div><button id="shuffle" class="shuffle-button" title="Generate another specimen" aria-label="Generate another specimen">${icon('shuffle', 19)}</button></div>
       <button id="reset-settings" class="text-button reset-settings">${icon('reset', 14)} Reset material</button>
     </aside>
   </main>
-  <footer class="statusbar"><span><i class="status-dot"></i><span id="render-status">Initializing renderer</span></span><span class="footer-center">A study in light, matter & happy accidents.</span><span id="resolution">RESIN LAB / 0.1</span></footer>
+  <footer class="statusbar"><span><i class="status-dot"></i><span id="render-status">Initializing renderer</span></span><span class="footer-center">A study in light, matter & happy accidents.</span><span id="resolution">RESIN LAB / 0.2</span></footer>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <dialog id="help"><button class="dialog-close" aria-label="Close help">${icon('close', 22)}</button><span class="eyebrow">WELCOME TO RESIN</span><h2>A small world.<br>A different lens.</h2><p>Encapsulate images and 3D objects in an uneven, light-bending resin surface. Everything is rendered on your device.</p><div class="help-steps"><p><b>01 &nbsp; Bring something in.</b>Drop images or models into the canvas. They can coexist as separate layers. Use self-contained GLB files for the easiest import. For glTF and OBJ, select the model and its .bin, .mtl and image files together. Draco-compressed GLBs aren’t supported yet.</p><p><b>02 &nbsp; Make it yours.</b>Select a layer to change its scale, depth, rotation or procedural material. Re-enable the built-in specimen with its eye button. Adjust the resin on the right. Drag to orbit, scroll to zoom, and hold Space to compare.</p><p><b>03 &nbsp; Keep a little light.</b>Export saves a PNG at twice the canvas size, up to 4096 pixels. The editor and uploaded files last for this browser session; export before leaving.</p></div><p class="help-footnote">The resin uses real-time, screen-space transmission: an artistic approximation of thick glass, not a full optical simulation. Procedural materials avoid bitmap pixels, but images still have finite resolution. Hidden surfaces and multiple transparent layers have rendering limits.</p><button id="start-creating" class="primary-button">Back to the experiment ${icon('arrow', 16)}</button></dialog>
+  <dialog id="help"><button class="dialog-close" aria-label="Close help">${icon('close', 22)}</button><span class="eyebrow">WELCOME TO RESIN</span><h2>A small world.<br>A different lens.</h2><p>Encapsulate images and 3D objects in an uneven, light-bending resin surface. Everything is rendered on your device.</p><div class="help-steps"><p><b>01 &nbsp; Bring something in.</b>Drop images or models into the canvas. They can coexist as separate layers. Use self-contained GLB files for the easiest import. For glTF and OBJ, select the model and its .bin, .mtl and image files together. Draco-compressed GLBs aren’t supported yet.</p><p><b>02 &nbsp; Make it yours.</b>Select a layer to change its scale, depth, rotation or procedural material. Re-enable the built-in specimen with its eye button. Adjust the resin on the right. Drag to orbit, scroll to zoom, and hold Space to compare.</p><p><b>03 &nbsp; Keep a little light.</b>Preview export saves a PNG at twice the canvas size, up to 4096 pixels. Quality export saves the current accumulated render at its actual rendering resolution. The editor and uploaded files last for this browser session; export before leaving.</p></div><p class="help-footnote">Preview uses fast screen-space transmission. Quality render follows multiple light bounces through the 3D scene and evaluates procedural colour at ray hits. It starts noisy and improves with samples; sharp caustics remain difficult. Colour dispersion is currently a Preview effect. Neither mode adds missing detail to uploaded images.</p><button id="start-creating" class="primary-button">Back to the experiment ${icon('arrow', 16)}</button></dialog>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 let engine: ResinEngine;
+let exporting = false;
 let selectedId = 'specimen';
 let toastTimer: ReturnType<typeof setTimeout>;
 function toast(message: string, error = false) {
@@ -89,14 +91,17 @@ function slider(parent: HTMLElement, options: SliderOptions) {
 }
 
 function renderControls() {
-  for (const id of ['#surface-controls', '#optics-controls', '#exposure-control']) $(id).replaceChildren();
+  for (const id of ['#surface-controls', '#optics-controls', '#exposure-control', '#lighting-controls']) $(id).replaceChildren();
   const definitions: [keyof Settings, string, string, number, number, number, string?][] = [
     ['distortion', 'Surface relief', '#surface-controls', 0, 1.5, 0.01, 'Changes the depth of the folds and the optical thickness.'],
     ['frequency', 'Fold frequency', '#surface-controls', 0.4, 2.5, 0.01],
     ['roughness', 'Roughness', '#surface-controls', 0, 0.35, 0.005],
+    ['imperfections', 'Clouding & inclusions', '#surface-controls', 0, 1, 0.01, 'Adds patches of surface roughness and small suspended inclusions.'],
     ['ior', 'Refractive index', '#optics-controls', 1, 2.2, 0.01, '1.00 is air. Around 1.46–1.56 is typical for clear resin.'],
-    ['dispersion', 'Colour dispersion', '#optics-controls', 0, 0.8, 0.01, 'Separates wavelengths subtly at the edges.'],
+    ['dispersion', 'Dispersion · preview', '#optics-controls', 0, 0.8, 0.01, 'Separates wavelengths subtly at the edges.'],
     ['exposure', 'Exposure', '#exposure-control', 0.4, 2, 0.01],
+    ['lightRotation', 'Light direction', '#lighting-controls', 0, 360, 1],
+    ['keyLight', 'Key light intensity', '#lighting-controls', 0, 6, 0.05],
   ];
   for (const [key, label, parent, min, max, step, hint] of definitions) {
     slider($(parent), { id: key, label, min, max, step, value: Number(engine.settings[key]), hint,
@@ -111,6 +116,33 @@ function renderControls() {
     const active = button.dataset.preset === engine.settings.preset;
     button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
   });
+}
+
+function updateRenderState(state: RenderState) {
+  const quality = state.mode === 'quality';
+  $('#quality-progress').hidden = !quality;
+  $('#quality-mode').setAttribute('aria-pressed', String(quality));
+  $('#preview-mode').setAttribute('aria-pressed', String(!quality));
+  $('.stage-badge').textContent = quality ? 'PROGRESSIVE / PATH TRACED' : 'REALTIME / WEBGL';
+  const text = state.phase === 'preparing' ? 'Preparing geometry & light paths…'
+    : state.phase === 'complete' ? `Render complete · ${Math.floor(state.samples)} samples`
+    : `${state.phase === 'paused' ? 'Paused' : state.samples < 1 ? 'Compiling & tracing' : 'Refining light'} · ${Math.floor(state.samples)} / ${state.target}`;
+  $('#quality-state').textContent = text;
+  $<HTMLProgressElement>('#quality-meter').max = state.target;
+  $<HTMLProgressElement>('#quality-meter').value = state.samples;
+  $('#quality-progress').classList.toggle('is-paused', state.phase === 'paused' || state.phase === 'complete');
+  const pause = $<HTMLButtonElement>('#quality-pause');
+  pause.disabled = state.phase === 'preparing' || state.phase === 'complete';
+  pause.innerHTML = icon(state.phase === 'paused' ? 'play' : 'pause', 14);
+  pause.setAttribute('aria-label', state.phase === 'paused' ? 'Resume quality render' : 'Pause quality render');
+  $('#render-status').textContent = quality ? text : 'WebGL active · local rendering';
+  const exportButton = $<HTMLButtonElement>('#export');
+  exportButton.disabled = exporting || quality && state.samples < 1;
+  if (!exporting) exportButton.innerHTML = `${quality ? 'Export render' : 'Export image'} ${icon('arrow', 16)}`;
+  if (quality) {
+    $('#motion').setAttribute('aria-pressed', 'false');
+    $('#motion').innerHTML = `${icon('play', 14)}<span>Orbit</span>`;
+  }
 }
 
 function renderLayers() {
@@ -229,6 +261,16 @@ requestAnimationFrame(() => {
       $('#render-status').textContent = 'Graphics context lost';
       $('#export').setAttribute('disabled', ''); $('#upload').setAttribute('disabled', '');
     };
+    engine.onRenderState = updateRenderState;
+    engine.onRenderError = message => toast(message, true);
+    updateRenderState(engine.renderState);
+    $('#quality-mode').addEventListener('click', () => void engine.startQuality());
+    $('#preview-mode').addEventListener('click', () => engine.returnToPreview());
+    $('#quality-cancel').addEventListener('click', () => engine.returnToPreview());
+    $('#quality-pause').addEventListener('click', () => engine.pauseQuality());
+    $('#quality-samples').addEventListener('change', event => engine.setQualitySamples(Number((event.target as HTMLSelectElement).value)));
+    $('#quality-scale').addEventListener('change', event => engine.setQualityScale(Number((event.target as HTMLSelectElement).value)));
+    $('#overview').addEventListener('click', () => engine.overview());
     renderControls(); renderLayers();
     $('#upload').addEventListener('click', () => $<HTMLInputElement>('#file-input').click());
     $('#file-input').addEventListener('change', event => {
@@ -256,6 +298,7 @@ requestAnimationFrame(() => {
     });
     $('#reset-view').addEventListener('click', () => { engine.resetCamera(); toast('Back to the first view.'); });
     $('#motion').addEventListener('click', () => {
+      engine.returnToPreview();
       engine.motion = !engine.motion;
       $('#motion').innerHTML = `${icon(engine.motion ? 'pause' : 'play', 14)}<span>Orbit</span>`;
       $('#motion').setAttribute('aria-pressed', String(engine.motion));
@@ -278,17 +321,18 @@ requestAnimationFrame(() => {
       catch { toast('Fullscreen is unavailable in this browser.', true); }
     });
     $('#export').addEventListener('click', async () => {
+      if (exporting) return; exporting = true;
       const button = $<HTMLButtonElement>('#export'); button.disabled = true; button.textContent = 'Rendering…';
       try {
-        const { blob, width, height } = await engine.exportImage();
+        const { blob, width, height, quality, samples } = await engine.exportImage();
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a'); link.href = url;
         const name = $<HTMLInputElement>('#project-name').value.trim().replace(/[^a-z0-9_-]/gi, '-').replace(/-+/g, '-').slice(0, 60) || 'resin-study';
         link.download = `${name.toLowerCase()}-${engine.settings.seed}.png`;
         link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-        toast(`Exported a little world. ${width} × ${height} PNG.`);
+        toast(quality ? `Quality render exported. ${width} × ${height} · ${samples} samples.` : `Exported a little world. ${width} × ${height} PNG.`);
       } catch (error) { toast(error instanceof Error ? error.message : 'Image export failed.', true); }
-      finally { button.disabled = false; button.innerHTML = `Export image ${icon('arrow', 16)}`; }
+      finally { exporting = false; updateRenderState(engine.renderState); }
     });
     let dragCount = 0;
     window.addEventListener('dragenter', event => {
@@ -307,6 +351,7 @@ requestAnimationFrame(() => {
       get settings() { return { ...engine.settings }; },
       get ready() { return engine.renderer.info.render.calls > 0; },
       get renderedFrames() { return engine.renderedFrames; },
+      get renderState() { return engine.renderState; },
     }, configurable: true });
   } catch (error) {
     console.error(error);

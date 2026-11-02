@@ -1,8 +1,17 @@
 import * as THREE from 'three';
 
 export type Pattern = 'moss' | 'mineral' | 'bark';
+export interface OrganicUniforms {
+  organicDark: { value: THREE.Color };
+  organicMid: { value: THREE.Color };
+  organicLight: { value: THREE.Color };
+  organicDetail: { value: number };
+}
+export const patternIds: Record<Pattern, number> = { moss: 1, mineral: 2, bark: 3 };
 
-const noise = /* glsl */ `
+// Shared by raster preview AND the path tracer: detail is evaluated at the actual
+// world-space ray hit, rather than baked to an image or sampled from the screen.
+export const organicGLSL = /* glsl */ `
 float organicHash(vec3 p) {
   p = fract(p * 0.3183099 + vec3(0.13, 0.27, 0.43));
   p *= 17.0;
@@ -19,29 +28,49 @@ float organicNoise(vec3 p) {
 float organicFbm(vec3 p) {
   return organicNoise(p) * 0.57 + organicNoise(p*2.07+3.1) * 0.28 + organicNoise(p*4.19+7.3) * 0.15;
 }
+vec3 organicColorAt(vec3 p, float pattern, vec3 dark, vec3 mid, vec3 light) {
+  vec3 q = p;
+  if (pattern > 2.5) q *= vec3(2.0, 1.0, 12.0);
+  float broad = organicFbm(q * 3.6);
+  float grain = organicFbm(q * 43.0);
+  float fleck = organicNoise(q * 138.0);
+  vec3 color = mix(dark, mid, smoothstep(0.25, 0.73, broad));
+  color = mix(color, light, smoothstep(0.61, 0.82, grain) * 0.65);
+  if (pattern > 1.5 && pattern < 2.5) {
+    float vein = abs(sin(p.x * 5.0 + p.z * 8.0 + broad * 15.0));
+    color = mix(color, light, pow(vein, 38.0) * 0.12);
+    float mica = smoothstep(0.88, 0.96, fleck);
+    color += light * mica * 0.25;
+  }
+  return color * (0.75 + fleck * 0.34);
+}
+float resinCloud(vec3 p) {
+  float cloudPatch = smoothstep(0.54, 0.76, organicFbm(p * 2.4 + 13.0));
+  return cloudPatch * (0.35 + organicNoise(p * 85.0) * 0.65);
+}
 `;
 
 const palettes: Record<Pattern, [string, string, string]> = {
-  moss: ['#242c1f', '#71814d', '#cfca83'],
-  mineral: ['#25282c', '#8d747d', '#d4b4ab'],
-  bark: ['#211c18', '#6a4932', '#b99564'],
+  moss: ['#172113', '#62783a', '#adb66c'],
+  mineral: ['#272a2d', '#87767f', '#c4beb0'],
+  bark: ['#191713', '#57442d', '#a48d66'],
 };
 
-/** Analytic world-space texture: no bitmap is enlarged when the resin magnifies it. */
 export function organicMaterial(pattern: Pattern, detail = 1, hue?: string) {
   const colors = palettes[pattern];
   const material = new THREE.MeshStandardMaterial({
-    color: 'white', roughness: pattern === 'mineral' ? 0.77 : 0.94,
-    metalness: pattern === 'mineral' ? 0.08 : 0,
+    color: 'white', roughness: pattern === 'mineral' ? 0.66 : 0.88,
+    metalness: 0,
   });
-  const uniforms = {
+  const uniforms: OrganicUniforms = {
     organicDark: { value: new THREE.Color(colors[0]) },
     organicMid: { value: new THREE.Color(hue ?? colors[1]) },
     organicLight: { value: new THREE.Color(colors[2]) },
     organicDetail: { value: detail },
   };
   material.userData.organic = uniforms;
-  material.customProgramCacheKey = () => `organic-${pattern}`;
+  material.userData.pattern = pattern;
+  material.customProgramCacheKey = () => `organic-v2-${pattern}`;
   material.onBeforeCompile = shader => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
@@ -60,31 +89,35 @@ export function organicMaterial(pattern: Pattern, detail = 1, hue?: string) {
         varying vec3 vOrganicPosition;
         uniform vec3 organicDark, organicMid, organicLight;
         uniform float organicDetail;
-        ${noise}
+        ${organicGLSL}
       `)
       .replace('#include <color_fragment>', /* glsl */ `
         #include <color_fragment>
-        vec3 op = vOrganicPosition * organicDetail;
-        float broad = organicFbm(op * ${pattern === 'bark' ? 'vec3(3.0, 2.0, 24.0)' : '3.6'});
-        float fleck = organicNoise(op * 96.0);
-        float grain = organicFbm(op * 32.0);
-        float patches = smoothstep(0.27, 0.76, broad);
-        vec3 organicColor = mix(organicDark, organicMid, patches);
-        organicColor = mix(organicColor, organicLight, smoothstep(0.56, 0.81, grain) * 0.75);
-        ${pattern === 'mineral' ? `
-          float vein = abs(sin(op.x * 7.0 + op.z * 9.0 + broad * 15.0));
-          organicColor = mix(organicColor, organicLight, pow(vein, 24.0)*0.55);
-        ` : ''}
-        organicColor *= 0.65 + fleck * 0.48;
-        diffuseColor.rgb *= organicColor;
+        diffuseColor.rgb *= organicColorAt(vOrganicPosition * organicDetail, ${patternIds[pattern]}.0,
+          organicDark, organicMid, organicLight);
       `)
       .replace('#include <normal_fragment_begin>', /* glsl */ `
         #include <normal_fragment_begin>
-        float relief = organicFbm(vOrganicPosition * 65.0 * organicDetail);
-        normal = normalize(normal + vec3(-dFdx(relief), -dFdy(relief), 0.0) * 1.8);
+        float relief = organicFbm(vOrganicPosition * 78.0 * organicDetail);
+        normal = normalize(normal + vec3(-dFdx(relief), -dFdy(relief), 0.0) * 0.45);
       `);
   };
   return material;
+}
+
+export function addResinImperfections(material: THREE.MeshPhysicalMaterial) {
+  const amount = { value: 0.25 };
+  material.userData.imperfections = amount;
+  material.customProgramCacheKey = () => 'resin-patches-v2';
+  material.onBeforeCompile = shader => {
+    shader.uniforms.imperfections = amount;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vResinPosition;')
+      .replace('#include <project_vertex>', 'vResinPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#include <project_vertex>');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nvarying vec3 vResinPosition;\nuniform float imperfections;\n${organicGLSL}`)
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor += resinCloud(vResinPosition) * imperfections * 0.32;');
+  };
 }
 
 export function setMaterialDetail(material: THREE.Material, detail: number) {

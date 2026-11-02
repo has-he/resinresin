@@ -1,7 +1,7 @@
 {
   "name": "resin-studio",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -10,7 +10,10 @@
     "test": "playwright test"
   },
   "dependencies": {
-    "three": "0.180.0"
+    "three": "0.180.0",
+    "three-gpu-pathtracer": "0.0.24",
+    "three-mesh-bvh": "0.9.1",
+    "xatlas-web": "0.1.0"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",

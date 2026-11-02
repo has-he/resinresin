@@ -1,12 +1,21 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { createEnvironment } from './environment';
+import { buildOrganicSpecimen } from './specimen';
+import { reshapeResin } from './surface';
+import type { QualityRenderer } from './quality';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { organicMaterial, randomFromSeed, setMaterialDetail, type Pattern } from './materials';
+import { organicMaterial, addResinImperfections, setMaterialDetail, type Pattern } from './materials';
+
+export interface RenderState {
+  mode: 'preview' | 'quality';
+  phase: 'ready' | 'preparing' | 'sampling' | 'paused' | 'complete';
+  samples: number; target: number;
+}
 
 export type Preset = 'forest' | 'mineral' | 'amber';
 export type LayerMaterial = Pattern | 'original';
@@ -36,11 +45,15 @@ export interface Settings {
   seed: number;
   preset: Preset;
   light: 'studio' | 'sunset';
+  imperfections: number;
+  lightRotation: number;
+  keyLight: number;
 }
 export const defaults: Settings = {
-  ior: 1.46, distortion: 0.72, frequency: 1.15, roughness: 0.035,
-  dispersion: 0.16, tint: '#e3e9cd', exposure: 1.15,
+  ior: 1.48, distortion: 0.72, frequency: 1.0, roughness: 0.018,
+  dispersion: 0.045, tint: '#f3eedc', exposure: 1.0,
   detail: 1, seed: 42, preset: 'forest', light: 'studio',
+  imperfections: 0.28, lightRotation: 0, keyLight: 2.8,
 };
 const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'avif']);
@@ -70,21 +83,30 @@ function disposeObject(object: THREE.Object3D) {
 export class ResinEngine {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
-  readonly camera = new THREE.PerspectiveCamera(43, 1, 0.1, 100);
+  readonly camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
   readonly controls: OrbitControls;
   readonly layers: Layer[] = [];
   readonly resinMaterial: THREE.MeshPhysicalMaterial;
   readonly resin: THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhysicalMaterial>;
-  private environment: THREE.WebGLRenderTarget;
+  private environment: THREE.Texture;
+  private warmEnvironment: THREE.Texture;
   private specimen = new THREE.Group();
   private originalSurface: Float32Array;
   private resizeObserver: ResizeObserver;
-  private sun = new THREE.DirectionalLight('#fff4d7', 2.3);
-  private fill = new THREE.DirectionalLight('#c9d6f2', 1.2);
+  private sun = new THREE.DirectionalLight('#fff0c9', 2.8);
+  private fill = new THREE.DirectionalLight('#a3d8e9', 1.3);
   private lastTime = 0;
   private disposed = false;
   private needsRender = true;
   private comparing = false;
+  private quality: QualityRenderer | null = null;
+  private preparingQuality = false;
+  private qualityGeneration = 0;
+  private lastRenderState = '';
+  qualityScale = 1;
+  qualitySamples = 256;
+  onRenderState?: (state: RenderState) => void;
+  onRenderError?: (message: string) => void;
   private materialCache = new Map<Pattern, THREE.MeshStandardMaterial>();
   onFrame?: (fps: number) => void;
   onContextLost?: () => void;
@@ -93,7 +115,7 @@ export class ResinEngine {
   frameCount = 0;
   renderedFrames = 0;
   get compare() { return this.comparing; }
-  set compare(value: boolean) { this.comparing = value; this.needsRender = true; }
+  set compare(value: boolean) { if (value) this.returnToPreview(); this.comparing = value; this.needsRender = true; }
 
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
@@ -101,40 +123,49 @@ export class ResinEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = defaults.exposure;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.setClearColor('#171c19');
+    this.renderer.setClearColor('#080b09');
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.domElement.setAttribute('aria-label', 'Interactive 3D resin specimen. Drag to orbit; scroll to zoom.');
     this.renderer.domElement.addEventListener('webglcontextlost', event => {
-      event.preventDefault(); this.onContextLost?.();
+      event.preventDefault(); this.returnToPreview(); this.renderer.setAnimationLoop(null); this.onContextLost?.();
     });
     container.prepend(this.renderer.domElement);
-    this.scene.background = new THREE.Color('#171c19');
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    const room = new RoomEnvironment();
-    this.environment = pmrem.fromScene(room, 0.03);
-    room.dispose(); pmrem.dispose();
-    this.scene.environment = this.environment.texture;
-    this.scene.environmentIntensity = 0.65;
-    this.sun.position.set(-3, 6, -2);
-    this.fill.position.set(4, 2, 4);
-    this.scene.add(new THREE.HemisphereLight('#f4f0d9', '#343a29', 0.8), this.sun, this.fill);
+    this.scene.background = new THREE.Color('#080b09');
+    this.environment = createEnvironment();
+    this.warmEnvironment = createEnvironment(true);
+    this.scene.environment = this.environment;
+    this.scene.environmentIntensity = 0.8;
+    this.sun.position.set(2, 6, -3);
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(1024, 1024);
+    this.sun.shadow.camera.left = -6; this.sun.shadow.camera.right = 6;
+    this.sun.shadow.camera.top = 6; this.sun.shadow.camera.bottom = -6;
+    this.sun.shadow.camera.near = 0.1; this.sun.shadow.camera.far = 18;
+    this.sun.shadow.bias = -0.0003; this.sun.shadow.normalBias = 0.025;
+    this.sun.shadow.radius = 3;
+    this.fill.position.set(-5, 2, 1);
+    this.scene.add(new THREE.HemisphereLight('#e0e4d3', '#161c12', 0.36), this.sun, this.fill);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.07;
-    this.controls.minDistance = 4;
+    this.controls.minDistance = 2.4;
     this.controls.maxDistance = 22;
     this.controls.maxPolarAngle = Math.PI * 0.48;
     this.controls.autoRotateSpeed = 0.35;
     this.controls.addEventListener('change', () => this.needsRender = true);
+    this.controls.addEventListener('start', () => this.returnToPreview());
     this.resetCamera();
 
     this.resinMaterial = new THREE.MeshPhysicalMaterial({
       color: '#ffffff', metalness: 0, roughness: defaults.roughness,
       transmission: 1, thickness: 2.4, ior: defaults.ior,
-      attenuationColor: new THREE.Color(defaults.tint), attenuationDistance: 5,
-      clearcoat: 1, clearcoatRoughness: 0.035, envMapIntensity: 1.15,
+      attenuationColor: new THREE.Color(defaults.tint), attenuationDistance: 12,
+      clearcoat: 0.35, clearcoatRoughness: 0.018, envMapIntensity: 1.0,
       dispersion: defaults.dispersion, side: THREE.FrontSide,
     });
-    const geometry = new THREE.SphereGeometry(1, 180, 120);
+    addResinImperfections(this.resinMaterial);
+    const geometry = new THREE.SphereGeometry(1, 200, 144);
     this.originalSurface = new Float32Array(geometry.attributes.position.array);
     this.resin = new THREE.Mesh(geometry, this.resinMaterial);
     this.resin.renderOrder = 10;
@@ -156,7 +187,17 @@ export class ResinEngine {
     if (this.disposed) return;
     this.controls.autoRotate = this.motion;
     this.controls.update();
-    if (this.needsRender || this.motion) {
+    if (this.quality) {
+      try {
+        if ((!this.quality.paused && !this.quality.complete) || this.needsRender) {
+          this.quality.render(); this.renderedFrames++; this.needsRender = false;
+        }
+        this.emitRenderState();
+      } catch (error) {
+        this.returnToPreview();
+        this.onRenderError?.(error instanceof Error ? error.message : 'Quality rendering stopped. Preview is still available.');
+      }
+    } else if (this.needsRender || this.motion) {
       this.resin.visible = !this.compare;
       this.renderer.render(this.scene, this.camera);
       this.needsRender = false;
@@ -170,6 +211,7 @@ export class ResinEngine {
   };
 
   private resize() {
+    this.returnToPreview();
     const { width, height } = this.container.getBoundingClientRect();
     if (!width || !height) return;
     this.camera.aspect = width / height;
@@ -179,12 +221,14 @@ export class ResinEngine {
   }
 
   resetCamera() {
-    this.camera.position.set(0, 10.3, 4.0);
-    this.controls.target.set(0, -0.15, 0);
+    this.returnToPreview();
+    this.camera.position.set(0.15, 6.7, 2.5);
+    this.controls.target.set(0.05, -0.1, 0.0);
     this.controls.update();
   }
 
   set<K extends keyof Settings>(key: K, value: Settings[K]) {
+    this.returnToPreview();
     this.needsRender = true;
     this.settings[key] = value;
     const s = this.settings;
@@ -193,13 +237,22 @@ export class ResinEngine {
     this.resinMaterial.clearcoatRoughness = s.roughness * 0.8;
     this.resinMaterial.dispersion = s.dispersion;
     this.resinMaterial.attenuationColor.set(s.tint);
-    this.resinMaterial.thickness = 1.3 + s.distortion * 1.4;
+    this.resinMaterial.thickness = 0.65 + s.distortion * 0.95;
+    this.resinMaterial.userData.imperfections.value = s.imperfections;
     this.renderer.toneMappingExposure = s.exposure;
-    this.sun.color.set(s.light === 'sunset' ? '#ffae68' : '#fff4d7');
+    this.sun.color.set(s.light === 'sunset' ? '#ffc079' : '#fff0c9');
+    this.sun.intensity = s.keyLight;
+    const angle = THREE.MathUtils.degToRad(s.lightRotation);
+    this.sun.position.set(2 * Math.cos(angle) - 3 * Math.sin(angle), 6, -3 * Math.cos(angle) - 2 * Math.sin(angle));
+    this.scene.environment = s.light === 'sunset' ? this.warmEnvironment : this.environment;
     this.fill.color.set(s.light === 'sunset' ? '#c8a6dc' : '#c9d6f2');
-    this.scene.environmentRotation.set(0, s.light === 'sunset' ? 1.7 : 0.3, 0);
+    this.scene.environmentRotation.set(0, angle, 0);
     if (key === 'distortion' || key === 'frequency' || key === 'seed') this.updateSurface();
     if (key === 'seed' || key === 'preset') this.buildSpecimen();
+    if (key === 'imperfections') {
+      const specks = this.specimen.getObjectByName('resin-inclusions') as THREE.InstancedMesh | undefined;
+      if (specks) specks.count = Math.floor(650 * s.imperfections);
+    }
     if (key === 'detail') {
       this.materialCache.forEach(material => setMaterialDetail(material, s.detail));
       this.scene.traverse(object => {
@@ -212,9 +265,9 @@ export class ResinEngine {
 
   applyPreset(preset: Preset) {
     const optical = {
-      forest: { tint: '#e3e9cd', distortion: 0.72, frequency: 1.15, ior: 1.46, light: 'studio' as const },
-      mineral: { tint: '#eddae9', distortion: 0.90, frequency: 1.55, ior: 1.52, light: 'studio' as const },
-      amber: { tint: '#ffd08d', distortion: 0.56, frequency: 0.80, ior: 1.49, light: 'sunset' as const },
+      forest: { tint: '#f3eedc', distortion: 0.72, frequency: 1.0, ior: 1.48, light: 'studio' as const },
+      mineral: { tint: '#ede3ee', distortion: 0.85, frequency: 1.25, ior: 1.52, light: 'studio' as const },
+      amber: { tint: '#f3d29e', distortion: 0.62, frequency: 0.80, ior: 1.49, light: 'sunset' as const },
     };
     Object.assign(this.settings, optical[preset]);
     this.set('preset', preset);
@@ -224,96 +277,17 @@ export class ResinEngine {
   }
 
   private updateSurface() {
-    const a = this.resin.geometry.attributes.position;
-    const s = this.settings;
-    const phase = s.seed * 0.17;
-    for (let i = 0; i < a.count; i++) {
-      const ox = this.originalSurface[i * 3];
-      const oy = this.originalSurface[i * 3 + 1];
-      const oz = this.originalSurface[i * 3 + 2];
-      const x = ox * 4.3;
-      const z = oz * 3.65;
-      const edge = 1 + 0.035 * Math.sin(Math.atan2(oz, ox) * 7 + phase);
-      const wave = Math.sin(x * 1.7 * s.frequency + Math.sin(z * 1.5 + phase) * 1.7 + phase) * 0.38
-        + Math.cos(z * 2.2 * s.frequency + Math.sin(x * 1.4 - phase) * 1.2) * 0.29
-        + Math.sin(x * 3.8 + z * 1.8 + phase) * 0.09;
-      const y = oy >= 0
-        ? 0.12 + Math.pow(oy, 0.48) * 0.83 + wave * s.distortion * Math.min(1, oy * 4)
-        : 0.12 + oy * 1.54;
-      a.setXYZ(i, x * edge, y, z * edge);
-    }
-    a.needsUpdate = true;
-    this.resin.geometry.computeVertexNormals();
-    this.resin.geometry.computeBoundingSphere();
+    reshapeResin(this.resin.geometry, this.originalSurface, this.settings);
   }
 
   private buildSpecimen() {
     for (const child of [...this.specimen.children]) disposeObject(child);
-    const random = randomFromSeed(this.settings.seed);
-    const { preset, detail } = this.settings;
-    const groundMaterial = organicMaterial(preset === 'forest' ? 'moss' : preset === 'mineral' ? 'mineral' : 'bark', detail);
-    const ground = new THREE.Mesh(new THREE.CircleGeometry(3.5, 96), groundMaterial);
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -1.08;
-    ground.scale.y = 0.86;
-    this.specimen.add(ground);
-
-    const rockMaterial = organicMaterial('mineral', detail, preset === 'amber' ? '#927b53' : preset === 'forest' ? '#646560' : '#997783');
-    for (let i = 0; i < 18; i++) {
-      const geometry = new THREE.IcosahedronGeometry(1, 3);
-      const pos = geometry.attributes.position;
-      for (let j = 0; j < pos.count; j++) {
-        const x = pos.getX(j), y = pos.getY(j), z = pos.getZ(j);
-        const d = 1 + Math.sin(x * 5.1 + i) * Math.cos(z * 4.7 + y * 3.4) * 0.13;
-        pos.setXYZ(j, x * d, y * d, z * d);
-      }
-      geometry.computeVertexNormals();
-      const rock = new THREE.Mesh(geometry, rockMaterial);
-      const angle = random() * Math.PI * 2, radius = Math.sqrt(random()) * 3.4;
-      rock.position.set(Math.cos(angle) * radius, -0.78, Math.sin(angle) * radius * 0.8);
-      const size = 0.28 + random() * 0.67;
-      rock.scale.set(size * (1.1 + random()), size * 0.65, size);
-      rock.rotation.set(random(), random() * 6, random());
-      this.specimen.add(rock);
-    }
-
-    const stemMaterial = organicMaterial('bark', detail);
-    for (let i = 0; i < 7; i++) {
-      const points: THREE.Vector3[] = [];
-      const x = (random() - 0.5) * 6, z = (random() - 0.5) * 5;
-      const direction = random() * Math.PI;
-      for (let j = 0; j < 7; j++) {
-        const d = (j - 3) * 0.36;
-        points.push(new THREE.Vector3(x + Math.cos(direction) * d, -0.43 + Math.sin(j * 0.8 + i) * 0.14, z + Math.sin(direction) * d + Math.sin(j) * 0.08));
-      }
-      const curve = new THREE.CatmullRomCurve3(points);
-      const twig = new THREE.Mesh(new THREE.TubeGeometry(curve, 35, 0.045 + random() * 0.035, 7, false), stemMaterial);
-      this.specimen.add(twig);
-    }
-
-    const mossMaterial = organicMaterial(preset === 'mineral' ? 'mineral' : 'moss', detail, preset === 'amber' ? '#a19754' : undefined);
-    const count = 6400;
-    const moss = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), mossMaterial, count);
-    const dummy = new THREE.Object3D();
-    const color = new THREE.Color();
-    const centers = Array.from({ length: 12 }, () => ({ x: (random() - 0.5) * 6.6, z: (random() - 0.5) * 5.3, size: 0.35 + random() * 0.6 }));
-    for (let i = 0; i < count; i++) {
-      const center = centers[i % centers.length];
-      const angle = random() * Math.PI * 2, r = Math.sqrt(random()) * center.size;
-      const x = center.x + Math.cos(angle) * r, z = center.z + Math.sin(angle) * r;
-      const mound = Math.sqrt(Math.max(0, 1 - (r / center.size) ** 2)) * center.size * 0.5;
-      dummy.position.set(x, -0.9 + mound + random() * 0.1, z);
-      const size = 0.018 + random() * 0.055;
-      dummy.scale.set(size, size * (1.2 + random() * 2), size);
-      dummy.rotation.set(random() * 1.2, random() * 6, random() * 1.2);
-      dummy.updateMatrix(); moss.setMatrixAt(i, dummy.matrix);
-      color.setHSL(preset === 'mineral' ? 0.8 + random() * 0.1 : 0.15 + random() * 0.10, 0.12 + random() * 0.18, 0.5 + random() * 0.3);
-      moss.setColorAt(i, color);
-    }
-    this.specimen.add(moss);
+    const generated = buildOrganicSpecimen(this.settings);
+    this.specimen.add(...generated.children);
   }
 
   updateLayer(layer: Layer) {
+    this.returnToPreview();
     layer.object.visible = layer.visible;
     layer.object.scale.setScalar(layer.scale);
     layer.object.position.y = layer.depth;
@@ -325,6 +299,7 @@ export class ResinEngine {
   }
 
   setLayerMaterial(layer: Layer, material: LayerMaterial) {
+    this.returnToPreview();
     this.needsRender = true;
     layer.material = material;
     if (layer.kind !== 'model') return;
@@ -341,6 +316,7 @@ export class ResinEngine {
   }
 
   removeLayer(id: string) {
+    this.returnToPreview();
     const index = this.layers.findIndex(l => l.id === id);
     if (index < 0 || id === 'specimen') return;
     const layer = this.layers[index];
@@ -354,6 +330,7 @@ export class ResinEngine {
   }
 
   async importFiles(files: File[], onLayer: (layer: Layer) => void, onError: (message: string) => void) {
+    this.returnToPreview();
     const urls = new Map<string, string>();
     const companions = new Set<string>();
     const manager = new THREE.LoadingManager();
@@ -467,7 +444,83 @@ export class ResinEngine {
     }
   }
 
+  get renderState(): RenderState {
+    const q = this.quality;
+    return {
+      mode: q || this.preparingQuality ? 'quality' : 'preview',
+      phase: this.preparingQuality ? 'preparing' : q ? q.complete ? 'complete' : q.paused ? 'paused' : 'sampling' : 'ready',
+      samples: q?.samples ?? 0, target: q?.targetSamples ?? this.qualitySamples,
+    };
+  }
+
+  private emitRenderState() {
+    const state = this.renderState;
+    const key = `${state.mode}-${state.phase}-${Math.floor(state.samples)}-${state.target}`;
+    if (key !== this.lastRenderState) { this.lastRenderState = key; this.onRenderState?.(state); }
+  }
+
+  returnToPreview() {
+    if (!this.quality && !this.preparingQuality) return;
+    this.qualityGeneration++;
+    this.quality?.dispose(); this.quality = null;
+    this.preparingQuality = false; this.needsRender = true;
+    this.emitRenderState();
+  }
+
+  async startQuality() {
+    this.returnToPreview();
+    const generation = ++this.qualityGeneration;
+    this.motion = false; this.compare = false;
+    this.controls.enableDamping = false; this.controls.update(); this.controls.enableDamping = true;
+    this.resin.visible = true;
+    this.preparingQuality = true; this.emitRenderState();
+    try {
+      const { QualityRenderer } = await import('./quality');
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      if (generation !== this.qualityGeneration || this.disposed) return;
+      const quality = new QualityRenderer(this.renderer, this.scene, this.camera, this.qualityScale, this.qualitySamples);
+      if (generation !== this.qualityGeneration || this.disposed) { quality.dispose(); return; }
+      this.quality = quality; this.preparingQuality = false; this.needsRender = true;
+      this.emitRenderState();
+    } catch (error) {
+      if (generation !== this.qualityGeneration) return;
+      this.returnToPreview();
+      this.onRenderError?.(error instanceof Error ? error.message : 'Could not start quality rendering.');
+    }
+  }
+
+  pauseQuality() {
+    if (!this.quality) return;
+    this.quality.paused = !this.quality.paused; this.needsRender = true; this.emitRenderState();
+  }
+
+  setQualityScale(scale: number) {
+    this.qualityScale = scale;
+    if (this.quality) { this.quality.setScale(scale); this.needsRender = true; this.emitRenderState(); }
+  }
+
+  setQualitySamples(samples: number) {
+    this.qualitySamples = samples;
+    if (this.quality) { this.quality.targetSamples = samples; this.needsRender = true; this.emitRenderState(); }
+  }
+
+  overview() {
+    this.returnToPreview();
+    this.camera.position.set(0, 12.8, 5.2); this.controls.target.set(0, -0.1, 0); this.controls.update();
+  }
+
   async exportImage() {
+    if (this.preparingQuality) throw new Error('Wait for the quality renderer to start, or switch to Preview.');
+    if (this.quality) {
+      if (this.quality.samples < 1) throw new Error('Wait for the first full quality sample before exporting.');
+      const { width, height } = this.quality.resolution;
+      const copy = document.createElement('canvas'); copy.width = width; copy.height = height;
+      const context = copy.getContext('2d');
+      if (!context) throw new Error('Image export is unavailable.');
+      context.drawImage(this.renderer.domElement, 0, 0, width, height);
+      const blob = await new Promise<Blob>((resolve, reject) => copy.toBlob(b => b ? resolve(b) : reject(new Error('Could not encode the render.')), 'image/png'));
+      return { blob, width, height, samples: Math.floor(this.quality?.samples ?? 0), quality: true };
+    }
     const size = this.renderer.getSize(new THREE.Vector2());
     const ratio = this.renderer.getPixelRatio();
     const max = 4096;
@@ -482,7 +535,7 @@ export class ResinEngine {
       const blob = await new Promise<Blob>((resolve, reject) => {
         this.renderer.domElement.toBlob(b => b ? resolve(b) : reject(new Error('Could not encode the image.')), 'image/png');
       });
-      return { blob, width, height };
+      return { blob, width, height, quality: false, samples: 0 };
     } finally {
       this.renderer.setPixelRatio(ratio);
       this.renderer.setSize(size.x, size.y, false);
@@ -492,12 +545,14 @@ export class ResinEngine {
   }
 
   dispose() {
+    this.returnToPreview();
     this.disposed = true;
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect(); this.controls.dispose();
     for (const layer of [...this.layers]) if (layer.kind !== 'specimen') this.removeLayer(layer.id);
     disposeObject(this.specimen); disposeObject(this.resin);
-    this.materialCache.forEach(m => m.dispose()); this.environment.dispose();
+    this.materialCache.forEach(m => m.dispose()); this.environment.dispose(); this.warmEnvironment.dispose();
+    this.sun.shadow.map?.dispose();
     this.renderer.dispose(); this.renderer.domElement.remove();
   }
 }
